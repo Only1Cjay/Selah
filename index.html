@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2A3F6B">
+<meta name="description" content="Selah — a quiet Bible study tracker. Log your reading, watch your progress across every book.">
+<title>Selah — Bible Study Tracker</title>
+
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+<script src="https://apis.google.com/js/api.js" async defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<script>
+  (function(){
+    try {
+      var t = localStorage.getItem('selah.theme') || 'light';
+      document.documentElement.setAttribute('data-theme', t);
+    } catch(e){}
+  })();
+</script>
+
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="offline-banner" id="offlineBanner" role="status" aria-live="polite">
+  <i class="fa-solid fa-wifi"></i>
+  <span>You're offline — changes will still save locally</span>
+</div>
+
+<header class="app-header">
+  <div class="header-left">
+    <img class="header-logo" src="icon.svg" alt="" aria-hidden="true">
+    <h1 class="app-title">Selah</h1>
+  </div>
+  <div class="header-right">
+    <span class="view-badge" id="viewBadge" hidden>View Only</span>
+    <button class="streak-chip" id="streakChip" aria-label="Reading streak" title="Reading streak">
+      <i class="fa-solid fa-fire"></i>
+      <span id="streakCount">0</span>
+    </button>
+    <button class="icon-btn" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
+      <i class="fa-solid fa-moon" id="themeIcon"></i>
+    </button>
+    <button class="icon-btn has-badge" id="menuBtn" aria-label="Open menu" title="Menu" aria-expanded="false">
+      <i class="fa-solid fa-bars"></i>
+      <span class="icon-badge" id="menuBadge" hidden></span>
+    </button>
+  </div>
+</header>
+
+<nav class="menu-dropdown" id="menuDropdown" hidden aria-label="Main menu">
+  <button class="menu-item" data-action="search">
+    <i class="fa-solid fa-magnifying-glass"></i><span>Search</span>
+  </button>
+  <button class="menu-item" data-action="sessions">
+    <i class="fa-solid fa-clock-rotate-left"></i><span>Sessions</span>
+  </button>
+  <button class="menu-item" data-action="stats">
+    <i class="fa-solid fa-chart-simple"></i><span>Stats</span>
+  </button>
+  <button class="menu-item" data-action="badges">
+    <i class="fa-solid fa-award"></i><span>Badges</span>
+  </button>
+  <button class="menu-item" data-action="settings">
+    <i class="fa-solid fa-gear"></i><span>Settings</span>
+  </button>
+  <div class="menu-divider"></div>
+  <button class="menu-item" data-action="tools">
+    <i class="fa-solid fa-toolbox"></i><span>Tools</span>
+  </button>
+</nav>
+<div class="menu-backdrop" id="menuBackdrop" hidden></div>
+
+<main class="app-main">
+
+  <!-- Overall progress -->
+  <section class="overall-card">
+    <div class="overall-head">
+      <div class="overall-label">Bible progress</div>
+      <div class="overall-percent num" id="overallPercent">0%</div>
+    </div>
+    <div class="overall-track">
+      <div class="overall-fill" id="overallFill" style="width:0%"></div>
+    </div>
+    <div class="overall-sub" id="overallSub">0 of 1189 chapters · 0 books started</div>
+  </section>
+
+  <!-- OT / NT tabs -->
+  <section class="testament-tabs" role="tablist">
+    <button class="tt-tab active" data-tt="ot" role="tab" aria-selected="true">Old Testament</button>
+    <button class="tt-tab" data-tt="nt" role="tab" aria-selected="false">New Testament</button>
+  </section>
+
+  <!-- Book list -->
+  <section class="book-list" id="bookList" aria-live="polite"></section>
+
+</main>
+
+<button class="fab" id="addSessionFab" aria-label="Log a session">
+  <i class="fa-solid fa-plus"></i>
+  <span class="fab-label">Log Session</span>
+</button>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
+
+<div class="view-root" id="viewRoot" hidden></div>
+
+<div class="modal-root" id="modalRoot" hidden>
+  <div class="modal-backdrop" id="modalBackdrop"></div>
+  <div class="modal-slot" id="modalSlot"></div>
+</div>
+
+<div class="install-banner" id="installBanner" hidden>
+  <i class="fa-solid fa-circle-down"></i>
+  <div class="install-text">
+    <strong>Install Selah</strong>
+    <span>Add to your home screen for quick access</span>
+  </div>
+  <button class="install-btn" id="installAccept">Install</button>
+  <button class="install-dismiss" id="installDismiss" aria-label="Dismiss">
+    <i class="fa-solid fa-xmark"></i>
+  </button>
+</div>
+
+<script src="storage.js"></script>
+<script src="books.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
