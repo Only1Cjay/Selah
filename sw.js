@@ -3,7 +3,7 @@
    Bump CACHE_VERSION on every deploy.
    ============================================================ */
 
-const CACHE_VERSION = 'v1.1.0';
+const CACHE_VERSION = 'v1.1.1';
 const CACHE_NAME = `selah-${CACHE_VERSION}`;
 
 const SHELL = [
