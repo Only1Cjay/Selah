@@ -4,33 +4,33 @@
    ============================================================ */
 
 /* ---------------------------------------------------------- */
-/* Theme: Parchment (default light)                            */
+/* Theme: Burgundy (default light)                             */
 /* ---------------------------------------------------------- */
 :root {
-  --primary: #2A3F6B;
-  --primary-soft: #E7EBF3;
-  --primary-ink: #1B2B4D;
-  --accent: #B8860B;
-  --accent-soft: #F7EFD8;
+  --primary: #6B2E3A;
+  --primary-soft: #F2E5E4;
+  --primary-ink: #4A1F28;
+  --accent: #C9A76A;
+  --accent-soft: #F7F0E0;
 
-  --bg: #F5F2EA;
+  --bg: #F7F3EC;
   --card: #FFFFFF;
-  --card-2: #EFEBE0;
-  --line: #E3DED0;
-  --line-strong: #D1CAB7;
+  --card-2: #EFE9DE;
+  --line: #E3DCCC;
+  --line-strong: #D0C7B0;
 
-  --text: #12161E;
-  --text-soft: #4A5160;
-  --muted: #8A8F9C;
+  --text: #1F1A14;
+  --text-soft: #524B40;
+  --muted: #8E8676;
 
-  --success: #2E7D5B;
-  --success-bg: #E5F3EB;
+  --success: #4E7A4A;
+  --success-bg: #E8F0E2;
   --danger: #B23A2E;
   --danger-bg: #F8E4E1;
 
-  --shadow-sm: 0 1px 2px rgba(18, 22, 30, 0.04);
-  --shadow: 0 2px 12px rgba(18, 22, 30, 0.05), 0 1px 2px rgba(18, 22, 30, 0.04);
-  --shadow-lg: 0 12px 40px rgba(18, 22, 30, 0.12);
+  --shadow-sm: 0 1px 2px rgba(31, 26, 20, 0.04);
+  --shadow: 0 2px 12px rgba(31, 26, 20, 0.05), 0 1px 2px rgba(31, 26, 20, 0.04);
+  --shadow-lg: 0 12px 40px rgba(31, 26, 20, 0.12);
 
   --radius-card: 22px;
   --radius-input: 16px;
@@ -44,63 +44,63 @@
 }
 
 /* ---------------------------------------------------------- */
-/* Theme: Deep (default dark)                                  */
+/* Theme: Leather (default dark)                               */
 /* ---------------------------------------------------------- */
 [data-theme="dark"] {
-  --primary: #8FA9D9;
-  --primary-soft: rgba(143, 169, 217, 0.12);
-  --primary-ink: #B5C8E8;
-  --accent: #E0B94A;
-  --accent-soft: rgba(224, 185, 74, 0.12);
+  --primary: #D9A0A8;
+  --primary-soft: rgba(217, 160, 168, 0.12);
+  --primary-ink: #E8BEC4;
+  --accent: #E0B980;
+  --accent-soft: rgba(224, 185, 128, 0.12);
 
-  --bg: #0F1420;
-  --card: #1A2130;
-  --card-2: #232B3D;
-  --line: #2A3346;
-  --line-strong: #3A455A;
+  --bg: #1A1215;
+  --card: #241A1F;
+  --card-2: #2E2228;
+  --line: #3A2A30;
+  --line-strong: #4E3A42;
 
-  --text: #F1F3F7;
-  --text-soft: #B8BECB;
-  --muted: #7C8493;
+  --text: #F5EFEB;
+  --text-soft: #C9BAB6;
+  --muted: #8A7B78;
 
-  --success: #6BC49A;
-  --success-bg: rgba(107, 196, 154, 0.12);
+  --success: #8DC08A;
+  --success-bg: rgba(141, 192, 138, 0.12);
   --danger: #F08A7C;
   --danger-bg: rgba(240, 138, 124, 0.12);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow: 0 4px 18px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
 }
 
 /* ---------------------------------------------------------- */
-/* Theme: Pastel (soft yellow)                                 */
+/* Theme: Pastel — pale lemon base (#FFFA9C)                    */
 /* ---------------------------------------------------------- */
 [data-theme="pastel"] {
-  --primary: #7A6B3F;
-  --primary-soft: #F5EDD3;
-  --primary-ink: #5A4E2C;
-  --accent: #C99A2E;
-  --accent-soft: #FAEFCB;
+  --primary: #8A6E1E;
+  --primary-soft: #FDF7A8;
+  --primary-ink: #5E4A10;
+  --accent: #B8860B;
+  --accent-soft: #FBF18E;
 
-  --bg: #FBF6E4;
-  --card: #FFFDF5;
-  --card-2: #F5EFD9;
-  --line: #E9E2C2;
-  --line-strong: #D5CBA5;
+  --bg: #FFFA9C;
+  --card: #FFFEF0;
+  --card-2: #F7F28E;
+  --line: #E5DC84;
+  --line-strong: #CFC46A;
 
-  --text: #2B2A20;
-  --text-soft: #5E5B48;
-  --muted: #97917A;
+  --text: #2A2410;
+  --text-soft: #5F5626;
+  --muted: #948B4E;
 
-  --success: #567A45;
-  --success-bg: #E8F0DD;
+  --success: #4E7A3A;
+  --success-bg: #EDF5C8;
   --danger: #B23A2E;
-  --danger-bg: #F5DFD8;
+  --danger-bg: #F8DCC8;
 
-  --shadow-sm: 0 1px 2px rgba(43, 42, 32, 0.04);
-  --shadow: 0 2px 12px rgba(43, 42, 32, 0.06), 0 1px 2px rgba(43, 42, 32, 0.04);
-  --shadow-lg: 0 12px 40px rgba(43, 42, 32, 0.12);
+  --shadow-sm: 0 1px 2px rgba(42, 36, 16, 0.06);
+  --shadow: 0 2px 12px rgba(42, 36, 16, 0.08), 0 1px 2px rgba(42, 36, 16, 0.05);
+  --shadow-lg: 0 12px 40px rgba(42, 36, 16, 0.15);
 }
 
 /* ---------------------------------------------------------- */
