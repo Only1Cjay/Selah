@@ -432,18 +432,38 @@
       `${p.read} of ${p.total} chapters · ${started} book${started === 1 ? '' : 's'} started`;
   }
 
-  function renderBookList() {
-    const books = state.view === 'nt' ? BibleBooks.nt : BibleBooks.ot;
+   function renderBookList() {
+    const data = state.data;
+    const reading = BibleBooks.all.filter((b) => {
+      const p = Storage.bookProgress(data, b.id);
+      return p.read > 0 && !p.finished;
+    });
+
     bookListEl.innerHTML = '';
 
-    if (!books.length) {
-      bookListEl.innerHTML = `<div class="empty-note">No books yet.</div>`;
+    const title = document.createElement('div');
+    title.className = 'home-section-title';
+    title.textContent = reading.length
+      ? `Currently reading · ${reading.length}`
+      : 'Currently reading';
+    bookListEl.appendChild(title);
+
+    if (!reading.length) {
+      const empty = document.createElement('div');
+      empty.className = 'home-empty';
+      empty.innerHTML = `
+        <i class="fa-solid fa-book-open-reader"></i>
+        <div class="home-empty-title">Nothing in progress</div>
+        <div class="home-empty-sub">
+          Tap <strong>Log Session</strong> to start a new reading,
+          or open <strong>Search</strong> from the menu to browse all 66 books.
+        </div>
+      `;
+      bookListEl.appendChild(empty);
       return;
     }
 
-    books.forEach((b) => {
-      bookListEl.appendChild(renderBookRow(b));
-    });
+    reading.forEach((b) => bookListEl.appendChild(renderBookRow(b)));
   }
 
   function renderBookRow(book) {
@@ -501,19 +521,6 @@
     container.innerHTML = chaptersHTML.join('');
   }
 
-  /* Testament tabs */
-  $$('.tt-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      const tt = tab.dataset.tt;
-      state.view = tt;
-      $$('.tt-tab').forEach((t) => {
-        const active = t.dataset.tt === tt;
-        t.classList.toggle('active', active);
-        t.setAttribute('aria-selected', String(active));
-      });
-      renderBookList();
-    });
-  });
 
   /* FAB */
   addSessionFab.addEventListener('click', () => {
@@ -776,6 +783,8 @@
   /* ============================================================ */
 
   function renderSearchView(root) {
+    let filter = 'all'; // all | reading | finished | notstarted
+
     root.innerHTML = `
       <div class="view-header view-header-search">
         <button class="view-back" data-act="back" aria-label="Back">
@@ -789,6 +798,12 @@
           </button>
         </div>
       </div>
+      <div class="browse-chips" id="browseChips">
+        <button class="browse-chip active" data-filter="all">All</button>
+        <button class="browse-chip" data-filter="reading">Reading</button>
+        <button class="browse-chip" data-filter="finished">Finished</button>
+        <button class="browse-chip" data-filter="notstarted">Not started</button>
+      </div>
       <div class="view-body" id="searchResults"></div>
     `;
 
@@ -797,60 +812,123 @@
     const input = root.querySelector('#searchInput');
     const clearBtn = root.querySelector('#searchClear');
     const results = root.querySelector('#searchResults');
+    const chipBar = root.querySelector('#browseChips');
 
-    setTimeout(() => input.focus(), 100);
+    chipBar.querySelectorAll('.browse-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        filter = chip.dataset.filter;
+        chipBar.querySelectorAll('.browse-chip').forEach((c) => {
+          c.classList.toggle('active', c.dataset.filter === filter);
+        });
+        render();
+      });
+    });
+
+    function matchesFilter(b) {
+      const p = Storage.bookProgress(state.data, b.id);
+      if (filter === 'reading')     return p.read > 0 && !p.finished;
+      if (filter === 'finished')    return p.finished;
+      if (filter === 'notstarted')  return p.read === 0;
+      return true;
+    }
+
+    function bookRowHTML(b, query) {
+      const p = Storage.bookProgress(state.data, b.id);
+      const bookLabel = query ? highlight(b.name, query) : escapeHTML(b.name);
+      const status =
+        p.finished ? 'Finished' :
+        p.read > 0 ? `${p.read} / ${p.total} · ${p.percent}%` :
+        `${p.total} chapters`;
+      return `
+        <button class="browse-row" data-book="${b.id}">
+          <div class="browse-row-left">
+            <div class="browse-row-title">
+              ${bookLabel}
+              ${p.finished ? '<span class="book-badge sm"><i class="fa-solid fa-check"></i></span>' : ''}
+            </div>
+            <div class="browse-row-sub">${escapeHTML(status)}</div>
+          </div>
+          ${p.read > 0 && !p.finished ? `
+            <div class="browse-row-track">
+              <div class="browse-row-fill" style="width:${p.percent}%"></div>
+            </div>` : ''}
+          ${p.read === 0 ? `
+            <div class="browse-row-track empty"></div>` : ''}
+        </button>`;
+    }
 
     function render() {
       const q = input.value.trim().toLowerCase();
       clearBtn.hidden = !q;
 
-      if (!q) {
-        results.innerHTML = `
-          <div class="search-hint">
-            <i class="fa-solid fa-magnifying-glass"></i>
-            <div class="search-hint-title">Search your reading</div>
-            <div class="search-hint-sub">Find a book by name, or a phrase in your notes.</div>
-          </div>`;
-        return;
+      // --- Note matches (only when there's a query) ---
+      const noteMatches = q
+        ? (state.data.sessions || []).filter((s) =>
+            (s.note || '').toLowerCase().includes(q)
+          )
+        : [];
+
+      // --- Book matches ---
+      const filteredBooks = BibleBooks.all.filter(matchesFilter);
+
+      let filteredByQuery = filteredBooks;
+      if (q) {
+        filteredByQuery = filteredBooks.filter((b) =>
+          b.name.toLowerCase().includes(q)
+        );
       }
 
-      // Book matches
-      const bookMatches = BibleBooks.all.filter((b) =>
-        b.name.toLowerCase().includes(q)
-      );
-
-      // Note matches
-      const noteMatches = (state.data.sessions || []).filter((s) =>
-        (s.note || '').toLowerCase().includes(q)
-      );
-
-      if (!bookMatches.length && !noteMatches.length) {
-        results.innerHTML = `
-          <div class="search-hint">
-            <i class="fa-solid fa-face-frown"></i>
-            <div class="search-hint-title">No matches</div>
-            <div class="search-hint-sub">Nothing found for "<strong>${escapeHTML(q)}</strong>".</div>
-          </div>`;
+      // --- Empty state ---
+      if (!filteredByQuery.length && !noteMatches.length) {
+        if (q) {
+          results.innerHTML = `
+            <div class="search-hint">
+              <i class="fa-solid fa-face-frown"></i>
+              <div class="search-hint-title">No matches</div>
+              <div class="search-hint-sub">Nothing found for "<strong>${escapeHTML(q)}</strong>".</div>
+            </div>`;
+        } else {
+          const filterLabels = {
+            reading: 'No books in progress',
+            finished: 'No books finished yet',
+            notstarted: 'Every book has been started'
+          };
+          results.innerHTML = `
+            <div class="search-hint">
+              <i class="fa-solid fa-book-bible"></i>
+              <div class="search-hint-title">${filterLabels[filter] || 'Nothing here'}</div>
+            </div>`;
+        }
         return;
       }
 
       let html = '';
 
-      if (bookMatches.length) {
-        html += `<div class="search-section-label">Books</div>`;
-        bookMatches.forEach((b) => {
-          const p = Storage.bookProgress(state.data, b.id);
-          html += `
-            <button class="search-result" data-book="${b.id}">
-              <span class="search-result-body">
-                <span class="search-result-topic">${highlight(b.name, q)}</span>
-                <span class="search-result-sub">${p.read}/${p.total} chapters · ${p.percent}%</span>
-              </span>
-              ${p.finished ? '<span class="book-badge"><i class="fa-solid fa-check"></i></span>' : ''}
-            </button>`;
-        });
+      // Books
+      if (filteredByQuery.length) {
+        if (q) {
+          html += `<div class="search-section-label">Books</div>`;
+          filteredByQuery.forEach((b) => {
+            html += bookRowHTML(b, q);
+          });
+        } else if (filter === 'all') {
+          // Group by testament
+          const ot = filteredByQuery.filter((b) => b.testament === 'ot');
+          const nt = filteredByQuery.filter((b) => b.testament === 'nt');
+          if (ot.length) {
+            html += `<div class="search-section-label">Old Testament</div>`;
+            ot.forEach((b) => { html += bookRowHTML(b, ''); });
+          }
+          if (nt.length) {
+            html += `<div class="search-section-label">New Testament</div>`;
+            nt.forEach((b) => { html += bookRowHTML(b, ''); });
+          }
+        } else {
+          filteredByQuery.forEach((b) => { html += bookRowHTML(b, ''); });
+        }
       }
 
+      // Notes
       if (noteMatches.length) {
         html += `<div class="search-section-label">Notes</div>`;
         noteMatches.slice(0, 30).forEach((s) => {
@@ -870,26 +948,7 @@
 
       results.querySelectorAll('[data-book]').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const bookId = btn.dataset.book;
-          closeView();
-          // Switch to the right testament and open the book's grid
-          setTimeout(() => {
-            const book = BibleBooks.get(bookId);
-            if (!book) return;
-            state.view = book.testament;
-            $$('.tt-tab').forEach((t) => {
-              const active = t.dataset.tt === book.testament;
-              t.classList.toggle('active', active);
-              t.setAttribute('aria-selected', String(active));
-            });
-            renderBookList();
-            // Open the row
-            const row = bookListEl.querySelector(`.book-row[data-book-id="${bookId}"]`);
-            if (row) {
-              row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              row.querySelector('.book-row-head')?.click();
-            }
-          }, 100);
+          openBookDetailSheet(btn.dataset.book);
         });
       });
 
@@ -919,9 +978,80 @@
       render();
     });
 
+    setTimeout(() => input.focus(), 100);
     render();
   }
 
+  /* ---------------------------------------------------------- */
+  /* Book detail sheet (from search)                             */
+  /* ---------------------------------------------------------- */
+  function openBookDetailSheet(bookId) {
+    const book = BibleBooks.get(bookId);
+    if (!book) return;
+    const p = Storage.bookProgress(state.data, bookId);
+    const set = Storage.readChapterSet(state.data);
+
+    const grid = [];
+    for (let c = 1; c <= book.chapters; c++) {
+      const read = set.has(`${bookId}-${c}`);
+      grid.push(`<span class="chapter-cell ${read ? 'read' : 'unread'}">${c}</span>`);
+    }
+
+    const sheet = document.createElement('div');
+    sheet.className = 'modal-sheet book-detail-sheet';
+    sheet.innerHTML = `
+      <div class="sheet-handle"></div>
+      <div class="book-detail-head">
+        <div>
+          <div class="book-detail-eyebrow">${book.testament === 'ot' ? 'Old Testament' : 'New Testament'}</div>
+          <h2 class="book-detail-title">
+            ${escapeHTML(book.name)}
+            ${p.finished ? '<span class="book-badge"><i class="fa-solid fa-check"></i></span>' : ''}
+          </h2>
+        </div>
+        <button class="icon-btn" data-act="close" aria-label="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="book-detail-stats">
+        <div class="book-detail-stat">
+          <span>Read</span>
+          <strong class="num">${p.read} / ${p.total}</strong>
+        </div>
+        <div class="book-detail-stat">
+          <span>Progress</span>
+          <strong class="num">${p.percent}%</strong>
+        </div>
+      </div>
+
+      <div class="book-detail-grid">
+        ${grid.join('')}
+      </div>
+
+      <div class="sheet-actions">
+        <button class="btn-ghost" data-act="close2">Close</button>
+        ${!state.readOnly ? `
+          <button class="btn-primary" data-act="log">
+            <i class="fa-solid fa-plus"></i> Log session
+          </button>
+        ` : ''}
+      </div>
+    `;
+    openModal(sheet);
+
+    sheet.querySelector('[data-act="close"]').addEventListener('click', closeModal);
+    sheet.querySelector('[data-act="close2"]').addEventListener('click', closeModal);
+
+    const logBtn = sheet.querySelector('[data-act="log"]');
+    if (logBtn) {
+      logBtn.addEventListener('click', () => {
+        closeModal();
+        if (!$('#viewRoot').hidden) closeView();
+        setTimeout(() => openSessionSheet({ mode: 'add', presetBook: bookId }), 120);
+      });
+    }
+  }
   /* ============================================================ */
   /* SESSIONS                                                     */
   /* ============================================================ */
