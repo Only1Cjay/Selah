@@ -35,11 +35,11 @@
   /* Theme (5 palettes)                                          */
   /* ---------------------------------------------------------- */
   const THEMES = [
-    { id: 'light',    name: 'Parchment',  isDark: false },
-    { id: 'dark',     name: 'Deep',       isDark: true  },
-    { id: 'pastel',   name: 'Pastel',     isDark: false },
-    { id: 'midnight', name: 'Midnight',   isDark: true  },
-    { id: 'sky',      name: 'Sky',        isDark: false }
+    { id: 'light',    name: 'Burgundy', isDark: false, c1: '#F7F3EC', c2: '#6B2E3A' },
+    { id: 'dark',     name: 'Leather',  isDark: true,  c1: '#1A1215', c2: '#D9A0A8' },
+    { id: 'pastel',   name: 'Pastel',   isDark: false, c1: '#FFFA9C', c2: '#8A6E1E' },
+    { id: 'midnight', name: 'Midnight', isDark: true,  c1: '#060A18', c2: '#7FA8F0' },
+    { id: 'sky',      name: 'Sky',      isDark: false, c1: '#EFF6FC', c2: '#235A8E' }
   ];
 
   const themeToggle = $('#themeToggle');
@@ -61,7 +61,7 @@
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
-      meta.setAttribute('content', bg || '#2A3F6B');
+      meta.setAttribute('content', bg || '#6B2E3A');
     }
   }
 
@@ -1619,27 +1619,24 @@
     const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
     const ro = state.readOnly;
 
-    const themeTiles = THEMES.map((t) => `
-      <button class="theme-tile ${t.id === currentTheme ? 'active' : ''}" data-theme-id="${t.id}">
-        <div class="theme-preview theme-preview-${t.id}">
-          <span class="swatch swatch-bg"></span>
-          <span class="swatch swatch-card"></span>
-          <span class="swatch swatch-primary"></span>
-        </div>
-        <div class="theme-name">${escapeHTML(t.name)}</div>
-      </button>
-    `).join('');
-
     root.innerHTML = `
       ${viewHeaderHTML('Settings')}
       <div class="view-body">
-
         <section class="settings-section">
           <div class="settings-section-title">Theme</div>
-          <div class="theme-grid">${themeTiles}</div>
-          <div class="settings-section-hint">Pick any palette — your choice is saved on this device.</div>
+          <div class="theme-circle-row">
+            ${THEMES.map((t) => `
+              <button class="theme-circle ${t.id === currentTheme ? 'active' : ''}" data-theme-id="${t.id}">
+                <span class="theme-circle-swatch" style="--c1:${t.c1};--c2:${t.c2};">
+                  <span class="theme-circle-half theme-circle-left"></span>
+                  <span class="theme-circle-half theme-circle-right"></span>
+                </span>
+                <span class="theme-circle-name">${escapeHTML(t.name)}</span>
+              </button>
+            `).join('')}
+          </div>
+          <div class="settings-section-hint">Tap a circle to switch — your choice is saved on this device.</div>
         </section>
-
         <section class="settings-section">
           <div class="settings-section-title">About</div>
           <div class="settings-card">
@@ -1725,18 +1722,18 @@
       if (el) el.textContent = v;
     });
 
-    // Theme tiles
-    root.querySelectorAll('.theme-tile').forEach((tile) => {
-      tile.addEventListener('click', () => {
-        const id = tile.dataset.themeId;
+    // Theme circles
+    root.querySelectorAll('.theme-circle').forEach((circle) => {
+      circle.addEventListener('click', () => {
+        const id = circle.dataset.themeId;
         applyTheme(id);
         if (!state.readOnly) {
           localStorage.setItem(LS.theme, id);
           Storage.updateSettings({ theme: id });
           state.data = Storage.getData();
         }
-        root.querySelectorAll('.theme-tile').forEach((t) => {
-          t.classList.toggle('active', t.dataset.themeId === id);
+        root.querySelectorAll('.theme-circle').forEach((c) => {
+          c.classList.toggle('active', c.dataset.themeId === id);
         });
       });
     });
