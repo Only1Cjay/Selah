@@ -1,7 +1,5 @@
 /* ============================================================
    Selah — app.js
-   Full app: shell + home (progress) + sessions + badges +
-   stats + settings + drive sync + tools
    ============================================================ */
 
 (() => {
@@ -15,16 +13,26 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  /* ---------------------------------------------------------- */
+  /* CLOUDFLARE SYNC CONFIG                                      */
+  /* ---------------------------------------------------------- */
+  const WORKER_URL = 'https://cjay-cloud.monaplayzsbackup.workers.dev';
+  const APP_ID = 'selah';
+  const DEFAULT_SYNC_TOKEN = 'slh_v7k3m9q2x5w8r1t4y6u0p3a9s2d5f8g1'; // Paste token from worker admin here
+  const SYNC_TOKEN_KEY = 'selah_sync_token';
+  const PUSH_FLAG_KEY = 'selah_push_enabled';
+  const SYNC_TIME_KEY = 'selah_last_sync';
+
+  let isSyncing = false;
+  let syncTimeout = null;
+  let syncingFromWorker = false;
+
   const state = {
     readOnly: false,
     demoMode: false,
-    data: null,
-    view: 'ot' // current testament tab
+    data: null
   };
 
-  /* ---------------------------------------------------------- */
-  /* URL flags                                                   */
-  /* ---------------------------------------------------------- */
   function parseUrlFlags() {
     const params = new URLSearchParams(location.search);
     state.demoMode = params.get('view') === '1';
@@ -54,7 +62,6 @@
     if (!THEMES.some((t) => t.id === id)) id = 'light';
     document.documentElement.setAttribute('data-theme', id);
 
-    // Header icon reflects the theme's mode, not the next theme's
     const dark = isDarkTheme(id);
     themeIcon.className = dark ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
 
@@ -68,8 +75,6 @@
   themeToggle.addEventListener('click', () => {
     const current = document.documentElement.getAttribute('data-theme') || 'light';
     const dark = isDarkTheme(current);
-    // Flip between light <-> dark pair; if a "special" palette is active,
-    // flip to its natural counterpart (light->dark, dark->light)
     const next = dark ? 'light' : 'dark';
     applyTheme(next);
     if (!state.readOnly) {
@@ -77,6 +82,72 @@
       Storage.updateSettings({ theme: next });
     }
   });
+
+  /* ---------------------------------------------------------- */
+  /* Sync Engine                                                 */
+  /* ---------------------------------------------------------- */
+  window.addEventListener('selah-storage-changed', () => {
+    if (!syncingFromWorker) scheduleSyncToWorker();
+  });
+
+  function scheduleSyncToWorker() {
+    if (isSyncing || state.readOnly) return;
+    clearTimeout(syncTimeout);
+    syncTimeout = setTimeout(() => { syncToWorker(); }, 2000);
+  }
+
+  async function syncToWorker() {
+    if (isSyncing || state.readOnly) return;
+    const token = localStorage.getItem(SYNC_TOKEN_KEY) || DEFAULT_SYNC_TOKEN;
+    if (!token || token === 'REPLACE_WITH_SELAH_TOKEN') return;
+    if (!navigator.onLine) return; 
+
+    isSyncing = true;
+    const statusEl = document.getElementById('syncStatusBox');
+    if (statusEl) { statusEl.textContent = 'Syncing...'; statusEl.style.color = 'var(--primary)'; }
+
+    try {
+      const data = Storage.getData();
+      const payload = {
+        collections: { sessions: data.sessions },
+        deletedIds: { sessions: data.deletedIds || [] },
+        settings: { theme: document.documentElement.getAttribute('data-theme') }
+      };
+
+      const res = await fetch(`${WORKER_URL}/v1/sync/${APP_ID}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Sync-Token': token },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const result = await res.json();
+      if (!result.ok) throw new Error(result.error || 'Sync failed');
+
+      syncingFromWorker = true;
+      const newData = Storage.getData();
+      newData.sessions = result.collections.sessions;
+      newData.deletedIds = result.deletedIds.sessions;
+
+      Storage.setData(newData);
+      state.data = Storage.getData();
+
+      if (result.settings && result.settings.theme) {
+        applyTheme(result.settings.theme);
+      }
+
+      localStorage.setItem(SYNC_TIME_KEY, new Date().toISOString());
+      
+      if (statusEl) { statusEl.textContent = 'Synced · ' + newData.sessions.length + ' sessions'; statusEl.style.color = 'var(--success)'; }
+      refresh();
+    } catch (err) {
+      console.error('[sync]', err);
+      if (statusEl) { statusEl.textContent = 'Sync failed'; statusEl.style.color = 'var(--danger)'; }
+    } finally {
+      syncingFromWorker = false;
+      isSyncing = false;
+    }
+  }
 
   /* ---------------------------------------------------------- */
   /* Menu                                                        */
@@ -133,24 +204,18 @@
       case 'export':    exportCSV();           break;
       case 'print':     openView('stats');     break;
       case 'clear-data': confirmResetAll();    break;
+      case 'drive':     openDriveModal();      break;
     }
   }
 
   /* ---------------------------------------------------------- */
-  /* Toast                                                       */
+  /* Toast & Modal                                               */
   /* ---------------------------------------------------------- */
   const toastStack = $('#toastStack');
   const MAX_TOASTS = 3;
 
   function toast(message, opts = {}) {
-    const {
-      icon = 'fa-circle-info',
-      type = 'info',
-      duration = 5000,
-      action = null,
-      persist = false
-    } = opts;
-
+    const { icon = 'fa-circle-info', type = 'info', duration = 5000, action = null, persist = false } = opts;
     const existing = $$('.toast', toastStack);
     if (existing.length >= MAX_TOASTS) dismissToast(existing[0]);
 
@@ -167,18 +232,13 @@
     if (action) {
       const btn = el.querySelector('.toast-action');
       btn.textContent = action.label;
-      btn.addEventListener('click', () => {
-        action.onClick?.();
-        dismissToast(el);
-      });
+      btn.addEventListener('click', () => { action.onClick?.(); dismissToast(el); });
     }
 
     el.querySelector('.toast-close').addEventListener('click', () => dismissToast(el));
     toastStack.appendChild(el);
 
-    if (!persist && duration > 0) {
-      el._timer = setTimeout(() => dismissToast(el), duration);
-    }
+    if (!persist && duration > 0) el._timer = setTimeout(() => dismissToast(el), duration);
     return el;
   }
 
@@ -190,9 +250,6 @@
     setTimeout(() => el.remove(), 240);
   }
 
-  /* ---------------------------------------------------------- */
-  /* Modal                                                       */
-  /* ---------------------------------------------------------- */
   const modalRoot = $('#modalRoot');
   const modalSlot = $('#modalSlot');
   const modalBackdrop = $('#modalBackdrop');
@@ -234,8 +291,6 @@
     if (hrs < 24) return `${hrs}h ago`;
     const days = Math.floor(hrs / 24);
     if (days < 7) return `${days}d ago`;
-    const weeks = Math.floor(days / 7);
-    if (weeks < 4) return `${weeks}w ago`;
     return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
@@ -269,23 +324,6 @@
     document.body.classList.remove('view-open');
   }
 
-  function renderPlaceholderView(el, name) {
-    el.innerHTML = `
-      <div class="view-header">
-        <button class="view-back" data-act="back" aria-label="Back">
-          <i class="fa-solid fa-arrow-left"></i>
-        </button>
-        <h2 class="view-title">${escapeHTML(name)}</h2>
-      </div>
-      <div class="view-body">
-        <div style="padding:48px 24px; text-align:center; color:var(--muted);">
-          Coming soon.
-        </div>
-      </div>
-    `;
-    el.querySelector('[data-act="back"]').addEventListener('click', closeView);
-  }
-
   function viewHeaderHTML(title, rightHTML = '') {
     return `
       <div class="view-header">
@@ -298,52 +336,14 @@
   }
 
   /* ---------------------------------------------------------- */
-  /* Offline banner                                              */
+  /* Offline banner & SW                                         */
   /* ---------------------------------------------------------- */
   const offlineBanner = $('#offlineBanner');
-  function updateOnlineStatus() {
-    offlineBanner.classList.toggle('show', !navigator.onLine);
-  }
+  function updateOnlineStatus() { offlineBanner.classList.toggle('show', !navigator.onLine); }
   window.addEventListener('online', updateOnlineStatus);
   window.addEventListener('offline', updateOnlineStatus);
   updateOnlineStatus();
 
-  /* ---------------------------------------------------------- */
-  /* Install prompt                                              */
-  /* ---------------------------------------------------------- */
-  const installBanner = $('#installBanner');
-  const installAccept = $('#installAccept');
-  const installDismiss = $('#installDismiss');
-  let deferredPrompt = null;
-
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    deferredPrompt = e;
-    if (localStorage.getItem(LS.installDismissed) !== '1') {
-      installBanner.hidden = false;
-    }
-  });
-
-  installAccept.addEventListener('click', async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-    deferredPrompt = null;
-    installBanner.hidden = true;
-    toast(outcome === 'accepted' ? 'Installing…' : 'Install dismissed', {
-      type: outcome === 'accepted' ? 'success' : 'info',
-      icon: 'fa-circle-down'
-    });
-  });
-
-  installDismiss.addEventListener('click', () => {
-    installBanner.hidden = true;
-    localStorage.setItem(LS.installDismissed, '1');
-  });
-
-  /* ---------------------------------------------------------- */
-  /* Service worker                                              */
-  /* ---------------------------------------------------------- */
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').then((reg) => {
@@ -364,29 +364,14 @@
   function showUpdateToast(reg) {
     const menuBadge = $('#menuBadge');
     const el = toast('New version available', {
-      icon: 'fa-arrows-rotate',
-      type: 'info',
-      persist: true,
+      icon: 'fa-arrows-rotate', type: 'info', persist: true,
       action: {
         label: 'Refresh',
-        onClick: () => {
-          reg.waiting?.postMessage({ type: 'SKIP_WAITING' });
-          setTimeout(() => window.location.reload(), 200);
-        }
+        onClick: () => { reg.waiting?.postMessage({ type: 'SKIP_WAITING' }); setTimeout(() => window.location.reload(), 200); }
       }
     });
-
-    setTimeout(() => {
-      if (el && !el._dismissed) {
-        dismissToast(el);
-        menuBadge.hidden = false;
-      }
-    }, 30000);
-
-    menuBadge.addEventListener('click', () => {
-      menuBadge.hidden = true;
-      showUpdateToast(reg);
-    }, { once: true });
+    setTimeout(() => { if (el && !el._dismissed) { dismissToast(el); menuBadge.hidden = false; } }, 30000);
+    menuBadge.addEventListener('click', () => { menuBadge.hidden = true; showUpdateToast(reg); }, { once: true });
   }
 
   let refreshing = false;
@@ -396,15 +381,13 @@
     window.location.reload();
   });
 
-  /* ============================================================ */
+  /* ---------------------------------------------------------- */
   /* HOME — progress                                             */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
   const bookListEl = $('#bookList');
   const overallPercent = $('#overallPercent');
   const overallFill = $('#overallFill');
   const overallSub = $('#overallSub');
-  const streakCountEl = $('#streakCount');
   const addSessionFab = $('#addSessionFab');
 
   function refresh() {
@@ -413,13 +396,8 @@
   }
 
   function renderAll() {
-    renderStreak();
     renderOverall();
     renderBookList();
-  }
-
-  function renderStreak() {
-    streakCountEl.textContent = Storage.streak(state.data);
   }
 
   function renderOverall() {
@@ -428,11 +406,10 @@
     overallFill.style.width = `${p.percent}%`;
 
     const started = Storage.booksStarted(state.data);
-    overallSub.textContent =
-      `${p.read} of ${p.total} chapters · ${started} book${started === 1 ? '' : 's'} started`;
+    overallSub.textContent = `${p.read} of ${p.total} chapters · ${started} book${started === 1 ? '' : 's'} started`;
   }
 
-   function renderBookList() {
+  function renderBookList() {
     const data = state.data;
     const reading = BibleBooks.all.filter((b) => {
       const p = Storage.bookProgress(data, b.id);
@@ -443,9 +420,7 @@
 
     const title = document.createElement('div');
     title.className = 'home-section-title';
-    title.textContent = reading.length
-      ? `Currently reading · ${reading.length}`
-      : 'Currently reading';
+    title.textContent = reading.length ? `Currently reading · ${reading.length}` : 'Currently reading';
     bookListEl.appendChild(title);
 
     if (!reading.length) {
@@ -521,8 +496,6 @@
     container.innerHTML = chaptersHTML.join('');
   }
 
-
-  /* FAB */
   addSessionFab.addEventListener('click', () => {
     if (state.readOnly) return;
     openSessionSheet({ mode: 'add' });
@@ -530,19 +503,15 @@
 
   if (state.readOnly) addSessionFab.hidden = true;
 
-  /* ============================================================ */
-  /* Session sheet (add / edit)                                  */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* Session sheet                                               */
+  /* ---------------------------------------------------------- */
   function openSessionSheet({ mode = 'add', sessionId = null, presetBook = null } = {}) {
-    const editing = mode === 'edit' && sessionId
-      ? Storage.getSession(sessionId)
-      : null;
+    const editing = mode === 'edit' && sessionId ? Storage.getSession(sessionId) : null;
 
     let currentBook = editing?.book || presetBook || 'GEN';
     let from = editing?.from ?? 1;
     let to = editing?.to ?? 1;
-    let note = editing?.note ?? '';
 
     const sheet = document.createElement('div');
     sheet.className = 'modal-sheet session-sheet';
@@ -628,7 +597,6 @@
       rangeHint.textContent = `${count} chapter${count === 1 ? '' : 's'} · ${bookName()} has ${max} total`;
     }
 
-    // --- Book picker ---
     function buildBookMenu() {
       const otHTML = `
         <div class="book-menu-section">
@@ -669,7 +637,6 @@
       } else {
         buildBookMenu();
         bookMenu.hidden = false;
-        // Scroll active into view
         const active = bookMenu.querySelector('.book-menu-item.active');
         if (active) setTimeout(() => active.scrollIntoView({ block: 'center' }), 40);
       }
@@ -679,7 +646,6 @@
       if (!e.target.closest('.book-picker-wrap')) bookMenu.hidden = true;
     });
 
-    // --- Steppers ---
     function setFrom(v) {
       const max = bookMax();
       from = Math.max(1, Math.min(max, v));
@@ -705,34 +671,21 @@
     fromInput.addEventListener('input', () => setFrom(Number(fromInput.value) || 1));
     toInput.addEventListener('input', () => setTo(Number(toInput.value) || 1));
 
-    // --- Actions ---
     sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
 
     sheet.querySelector('[data-act="save"]').addEventListener('click', () => {
-      note = noteInput.value;
-
       if (editing) {
-        const res = Storage.updateSession(editing.id, {
-          book: currentBook, from, to, note
-        });
+        const res = Storage.updateSession(editing.id, { book: currentBook, from, to, note: noteInput.value });
         closeModal();
         refresh();
-        if (res?.justCompleted) {
-          celebrateBook(currentBook);
-        } else {
-          toast('Session updated', { type: 'success', icon: 'fa-check' });
-        }
+        if (res?.justCompleted) celebrateBook(currentBook);
+        else toast('Session updated', { type: 'success', icon: 'fa-check' });
       } else {
-        const res = Storage.addSession({
-          book: currentBook, from, to, note
-        });
+        const res = Storage.addSession({ book: currentBook, from, to, note: noteInput.value });
         closeModal();
         refresh();
-        if (res?.justCompleted) {
-          celebrateBook(currentBook);
-        } else {
-          toast('Session logged', { type: 'success', icon: 'fa-book-bible' });
-        }
+        if (res?.justCompleted) celebrateBook(currentBook);
+        else toast('Session logged', { type: 'success', icon: 'fa-book-bible' });
       }
     });
 
@@ -749,16 +702,14 @@
   function doDeleteSessionWithUndo(session) {
     Storage.removeSession(session.id);
     refresh();
-
     toast('Session removed', {
-      type: 'info',
-      icon: 'fa-trash-can',
-      duration: 5000,
+      type: 'info', icon: 'fa-trash-can', duration: 5000,
       action: {
         label: 'Undo',
         onClick: () => {
           const data = Storage.getData();
           data.sessions.push(session);
+          data.deletedIds = (data.deletedIds || []).filter(x => x !== session.id);
           Storage.setData(data);
           refresh();
           toast('Restored', { type: 'success', icon: 'fa-rotate-left' });
@@ -770,32 +721,23 @@
   function celebrateBook(bookId) {
     const book = BibleBooks.get(bookId);
     if (!book) return;
-    const el = toast(`Book complete — ${book.name}!`, {
-      type: 'success',
-      icon: 'fa-award',
-      duration: 8000
-    });
+    const el = toast(`Book complete — ${book.name}!`, { type: 'success', icon: 'fa-award', duration: 8000 });
     el.classList.add('toast-celebrate');
   }
 
-  /* ============================================================ */
-  /* SEARCH                                                       */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* SEARCH                                                      */
+  /* ---------------------------------------------------------- */
   function renderSearchView(root) {
-    let filter = 'all'; // all | reading | finished | notstarted
+    let filter = 'all'; 
 
     root.innerHTML = `
       <div class="view-header view-header-search">
-        <button class="view-back" data-act="back" aria-label="Back">
-          <i class="fa-solid fa-arrow-left"></i>
-        </button>
+        <button class="view-back" data-act="back" aria-label="Back"><i class="fa-solid fa-arrow-left"></i></button>
         <div class="search-input-wrap">
           <i class="fa-solid fa-magnifying-glass"></i>
           <input type="text" id="searchInput" placeholder="Search books and notes…" autocomplete="off" spellcheck="false">
-          <button class="search-clear" id="searchClear" hidden aria-label="Clear">
-            <i class="fa-solid fa-xmark"></i>
-          </button>
+          <button class="search-clear" id="searchClear" hidden aria-label="Clear"><i class="fa-solid fa-xmark"></i></button>
         </div>
       </div>
       <div class="browse-chips" id="browseChips">
@@ -817,9 +759,7 @@
     chipBar.querySelectorAll('.browse-chip').forEach((chip) => {
       chip.addEventListener('click', () => {
         filter = chip.dataset.filter;
-        chipBar.querySelectorAll('.browse-chip').forEach((c) => {
-          c.classList.toggle('active', c.dataset.filter === filter);
-        });
+        chipBar.querySelectorAll('.browse-chip').forEach((c) => c.classList.toggle('active', c.dataset.filter === filter));
         render();
       });
     });
@@ -835,10 +775,7 @@
     function bookRowHTML(b, query) {
       const p = Storage.bookProgress(state.data, b.id);
       const bookLabel = query ? highlight(b.name, query) : escapeHTML(b.name);
-      const status =
-        p.finished ? 'Finished' :
-        p.read > 0 ? `${p.read} / ${p.total} · ${p.percent}%` :
-        `${p.total} chapters`;
+      const status = p.finished ? 'Finished' : p.read > 0 ? `${p.read} / ${p.total} · ${p.percent}%` : `${p.total} chapters`;
       return `
         <button class="browse-row" data-book="${b.id}">
           <div class="browse-row-left">
@@ -848,12 +785,8 @@
             </div>
             <div class="browse-row-sub">${escapeHTML(status)}</div>
           </div>
-          ${p.read > 0 && !p.finished ? `
-            <div class="browse-row-track">
-              <div class="browse-row-fill" style="width:${p.percent}%"></div>
-            </div>` : ''}
-          ${p.read === 0 ? `
-            <div class="browse-row-track empty"></div>` : ''}
+          ${p.read > 0 && !p.finished ? `<div class="browse-row-track"><div class="browse-row-fill" style="width:${p.percent}%"></div></div>` : ''}
+          ${p.read === 0 ? `<div class="browse-row-track empty"></div>` : ''}
         </button>`;
     }
 
@@ -861,74 +794,36 @@
       const q = input.value.trim().toLowerCase();
       clearBtn.hidden = !q;
 
-      // --- Note matches (only when there's a query) ---
-      const noteMatches = q
-        ? (state.data.sessions || []).filter((s) =>
-            (s.note || '').toLowerCase().includes(q)
-          )
-        : [];
-
-      // --- Book matches ---
+      const noteMatches = q ? (state.data.sessions || []).filter((s) => (s.note || '').toLowerCase().includes(q)) : [];
       const filteredBooks = BibleBooks.all.filter(matchesFilter);
-
       let filteredByQuery = filteredBooks;
-      if (q) {
-        filteredByQuery = filteredBooks.filter((b) =>
-          b.name.toLowerCase().includes(q)
-        );
-      }
+      if (q) filteredByQuery = filteredBooks.filter((b) => b.name.toLowerCase().includes(q));
 
-      // --- Empty state ---
       if (!filteredByQuery.length && !noteMatches.length) {
         if (q) {
-          results.innerHTML = `
-            <div class="search-hint">
-              <i class="fa-solid fa-face-frown"></i>
-              <div class="search-hint-title">No matches</div>
-              <div class="search-hint-sub">Nothing found for "<strong>${escapeHTML(q)}</strong>".</div>
-            </div>`;
+          results.innerHTML = `<div class="search-hint"><i class="fa-solid fa-face-frown"></i><div class="search-hint-title">No matches</div><div class="search-hint-sub">Nothing found for "<strong>${escapeHTML(q)}</strong>".</div></div>`;
         } else {
-          const filterLabels = {
-            reading: 'No books in progress',
-            finished: 'No books finished yet',
-            notstarted: 'Every book has been started'
-          };
-          results.innerHTML = `
-            <div class="search-hint">
-              <i class="fa-solid fa-book-bible"></i>
-              <div class="search-hint-title">${filterLabels[filter] || 'Nothing here'}</div>
-            </div>`;
+          const filterLabels = { reading: 'No books in progress', finished: 'No books finished yet', notstarted: 'Every book has been started' };
+          results.innerHTML = `<div class="search-hint"><i class="fa-solid fa-book-bible"></i><div class="search-hint-title">${filterLabels[filter] || 'Nothing here'}</div></div>`;
         }
         return;
       }
 
       let html = '';
-
-      // Books
       if (filteredByQuery.length) {
         if (q) {
           html += `<div class="search-section-label">Books</div>`;
-          filteredByQuery.forEach((b) => {
-            html += bookRowHTML(b, q);
-          });
+          filteredByQuery.forEach((b) => { html += bookRowHTML(b, q); });
         } else if (filter === 'all') {
-          // Group by testament
           const ot = filteredByQuery.filter((b) => b.testament === 'ot');
           const nt = filteredByQuery.filter((b) => b.testament === 'nt');
-          if (ot.length) {
-            html += `<div class="search-section-label">Old Testament</div>`;
-            ot.forEach((b) => { html += bookRowHTML(b, ''); });
-          }
-          if (nt.length) {
-            html += `<div class="search-section-label">New Testament</div>`;
-            nt.forEach((b) => { html += bookRowHTML(b, ''); });
-          }
+          if (ot.length) { html += `<div class="search-section-label">Old Testament</div>`; ot.forEach((b) => { html += bookRowHTML(b, ''); }); }
+          if (nt.length) { html += `<div class="search-section-label">New Testament</div>`; nt.forEach((b) => { html += bookRowHTML(b, ''); }); }
         } else {
           filteredByQuery.forEach((b) => { html += bookRowHTML(b, ''); });
         }
       }
 
-      // Notes
       if (noteMatches.length) {
         html += `<div class="search-section-label">Notes</div>`;
         noteMatches.slice(0, 30).forEach((s) => {
@@ -945,20 +840,8 @@
       }
 
       results.innerHTML = html;
-
-      results.querySelectorAll('[data-book]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          openBookDetailSheet(btn.dataset.book);
-        });
-      });
-
-      results.querySelectorAll('[data-session]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const id = btn.dataset.session;
-          closeView();
-          setTimeout(() => openSessionDetail(id), 100);
-        });
-      });
+      results.querySelectorAll('[data-book]').forEach((btn) => { btn.addEventListener('click', () => { openBookDetailSheet(btn.dataset.book); }); });
+      results.querySelectorAll('[data-session]').forEach((btn) => { btn.addEventListener('click', () => { const id = btn.dataset.session; closeView(); setTimeout(() => openSessionDetail(id), 100); }); });
     }
 
     function highlight(text, query) {
@@ -966,25 +849,15 @@
       if (!query) return escapeHTML(t);
       const idx = t.toLowerCase().indexOf(query.toLowerCase());
       if (idx === -1) return escapeHTML(t);
-      return escapeHTML(t.slice(0, idx)) +
-             '<mark>' + escapeHTML(t.slice(idx, idx + query.length)) + '</mark>' +
-             escapeHTML(t.slice(idx + query.length));
+      return escapeHTML(t.slice(0, idx)) + '<mark>' + escapeHTML(t.slice(idx, idx + query.length)) + '</mark>' + escapeHTML(t.slice(idx + query.length));
     }
 
     input.addEventListener('input', render);
-    clearBtn.addEventListener('click', () => {
-      input.value = '';
-      input.focus();
-      render();
-    });
-
+    clearBtn.addEventListener('click', () => { input.value = ''; input.focus(); render(); });
     setTimeout(() => input.focus(), 100);
     render();
   }
 
-  /* ---------------------------------------------------------- */
-  /* Book detail sheet (from search)                             */
-  /* ---------------------------------------------------------- */
   function openBookDetailSheet(bookId) {
     const book = BibleBooks.get(bookId);
     if (!book) return;
@@ -1004,38 +877,18 @@
       <div class="book-detail-head">
         <div>
           <div class="book-detail-eyebrow">${book.testament === 'ot' ? 'Old Testament' : 'New Testament'}</div>
-          <h2 class="book-detail-title">
-            ${escapeHTML(book.name)}
-            ${p.finished ? '<span class="book-badge"><i class="fa-solid fa-check"></i></span>' : ''}
-          </h2>
+          <h2 class="book-detail-title">${escapeHTML(book.name)} ${p.finished ? '<span class="book-badge"><i class="fa-solid fa-check"></i></span>' : ''}</h2>
         </div>
-        <button class="icon-btn" data-act="close" aria-label="Close">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
+        <button class="icon-btn" data-act="close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
       </div>
-
       <div class="book-detail-stats">
-        <div class="book-detail-stat">
-          <span>Read</span>
-          <strong class="num">${p.read} / ${p.total}</strong>
-        </div>
-        <div class="book-detail-stat">
-          <span>Progress</span>
-          <strong class="num">${p.percent}%</strong>
-        </div>
+        <div class="book-detail-stat"><span>Read</span><strong class="num">${p.read} / ${p.total}</strong></div>
+        <div class="book-detail-stat"><span>Progress</span><strong class="num">${p.percent}%</strong></div>
       </div>
-
-      <div class="book-detail-grid">
-        ${grid.join('')}
-      </div>
-
+      <div class="book-detail-grid">${grid.join('')}</div>
       <div class="sheet-actions">
         <button class="btn-ghost" data-act="close2">Close</button>
-        ${!state.readOnly ? `
-          <button class="btn-primary" data-act="log">
-            <i class="fa-solid fa-plus"></i> Log session
-          </button>
-        ` : ''}
+        ${!state.readOnly ? `<button class="btn-primary" data-act="log"><i class="fa-solid fa-plus"></i> Log session</button>` : ''}
       </div>
     `;
     openModal(sheet);
@@ -1052,10 +905,10 @@
       });
     }
   }
-  /* ============================================================ */
-  /* SESSIONS                                                     */
-  /* ============================================================ */
 
+  /* ---------------------------------------------------------- */
+  /* SESSIONS                                                    */
+  /* ---------------------------------------------------------- */
   function renderSessionsView(root, payload = {}) {
     let filter = payload.book || 'all';
 
@@ -1066,7 +919,6 @@
     `;
 
     root.querySelector('[data-act="back"]').addEventListener('click', closeView);
-
     const filterBar = root.querySelector('#sessionsFilter');
     const body = root.querySelector('#sessionsBody');
 
@@ -1079,7 +931,6 @@
     function renderFilters() {
       const books = subjectsWithSessions();
       if (!books.length) { filterBar.innerHTML = ''; return; }
-
       const chips = ['all', ...books];
       filterBar.innerHTML = chips.map((id) => {
         const label = id === 'all' ? 'All' : (BibleBooks.get(id)?.name || id);
@@ -1087,11 +938,7 @@
       }).join('');
 
       filterBar.querySelectorAll('.sessions-chip').forEach((c) => {
-        c.addEventListener('click', () => {
-          filter = c.dataset.filter;
-          renderFilters();
-          renderEntries();
-        });
+        c.addEventListener('click', () => { filter = c.dataset.filter; renderFilters(); renderEntries(); });
       });
     }
 
@@ -1104,28 +951,18 @@
       const d = new Date(iso);
       const today = new Date();
       const yesterday = new Date(Date.now() - 86400000);
-      const same = (a, b) =>
-        a.getFullYear() === b.getFullYear() &&
-        a.getMonth() === b.getMonth() &&
-        a.getDate() === b.getDate();
+      const same = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
       if (same(d, today)) return 'Today';
       if (same(d, yesterday)) return 'Yesterday';
       return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
     }
 
     function renderEntries() {
-      let items = (state.data.sessions || []).slice()
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
+      let items = (state.data.sessions || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       if (filter !== 'all') items = items.filter((s) => s.book === filter);
 
       if (!items.length) {
-        body.innerHTML = `
-          <div class="search-hint">
-            <i class="fa-solid fa-book-bible"></i>
-            <div class="search-hint-title">No sessions yet</div>
-            <div class="search-hint-sub">Tap the <strong>Log Session</strong> button to add your first reading.</div>
-          </div>`;
+        body.innerHTML = `<div class="search-hint"><i class="fa-solid fa-book-bible"></i><div class="search-hint-title">No sessions yet</div><div class="search-hint-sub">Tap the <strong>Log Session</strong> button to add your first reading.</div></div>`;
         return;
       }
 
@@ -1140,18 +977,13 @@
       groups.forEach((entries) => {
         const day = document.createElement('div');
         day.className = 'sessions-day';
-        day.innerHTML = `
-          <div class="sessions-day-label">${escapeHTML(dayLabel(entries[0].createdAt))}</div>
-          <div class="sessions-day-entries"></div>
-        `;
+        day.innerHTML = `<div class="sessions-day-label">${escapeHTML(dayLabel(entries[0].createdAt))}</div><div class="sessions-day-entries"></div>`;
         const list = day.querySelector('.sessions-day-entries');
 
         entries.forEach((s) => {
           const book = BibleBooks.get(s.book);
           const bookName = book ? book.name : s.book;
-          const time = new Date(s.createdAt).toLocaleTimeString(undefined, {
-            hour: 'numeric', minute: '2-digit'
-          });
+          const time = new Date(s.createdAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
           const range = s.from === s.to ? `${s.from}` : `${s.from}–${s.to}`;
           const count = s.to - s.from + 1;
           const hasNote = (s.note || '').trim().length > 0;
@@ -1161,10 +993,7 @@
           btn.innerHTML = `
             <div class="session-entry-main">
               <div class="session-entry-title">${escapeHTML(bookName)} ${escapeHTML(range)}</div>
-              <div class="session-entry-sub">
-                ${count} chapter${count === 1 ? '' : 's'}
-                ${hasNote ? ' · <i class="fa-solid fa-note-sticky"></i> note' : ''}
-              </div>
+              <div class="session-entry-sub">${count} chapter${count === 1 ? '' : 's'} ${hasNote ? ' · <i class="fa-solid fa-note-sticky"></i> note' : ''}</div>
             </div>
             <div class="session-entry-time">${escapeHTML(time)}</div>
           `;
@@ -1187,10 +1016,7 @@
     const book = BibleBooks.get(s.book);
     const bookName = book ? book.name : s.book;
     const range = s.from === s.to ? `${s.from}` : `${s.from}–${s.to}`;
-    const date = new Date(s.createdAt).toLocaleString(undefined, {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-      hour: 'numeric', minute: '2-digit'
-    });
+    const date = new Date(s.createdAt).toLocaleString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
     const sheet = document.createElement('div');
     sheet.className = 'modal-sheet session-detail-sheet';
@@ -1198,9 +1024,7 @@
       <div class="sheet-handle"></div>
       <div class="detail-head">
         <div class="detail-eyebrow">${escapeHTML(bookName)}</div>
-        <button class="icon-btn" data-act="close" aria-label="Close">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
+        <button class="icon-btn" data-act="close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <h2 class="detail-title">Chapters ${escapeHTML(range)}</h2>
       <div class="detail-meta">${escapeHTML(date)}</div>
@@ -1233,10 +1057,9 @@
     }
   }
 
-  /* ============================================================ */
-  /* STATS                                                        */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* STATS                                                       */
+  /* ---------------------------------------------------------- */
   function renderStatsView(root) {
     const data = state.data;
     const overall = Storage.overallProgress(data);
@@ -1245,7 +1068,6 @@
     const sessions = data.sessions || [];
     const streak = Storage.streak(data);
 
-    // Per-book progress list, sorted by percent desc then canonical order
     const bookStats = BibleBooks.all.map((b) => {
       const p = Storage.bookProgress(data, b.id);
       return { book: b, ...p };
@@ -1253,7 +1075,7 @@
 
     const sorted = bookStats.slice().sort((a, b) => {
       if (b.percent !== a.percent) return b.percent - a.percent;
-      return 0; // preserve canonical order on ties
+      return 0;
     });
 
     root.innerHTML = `
@@ -1280,15 +1102,9 @@
         </div>
 
         <div class="stats-secondary">
-          <div class="stats-secondary-item">
-            <span>Books started</span><strong class="num">${started}</strong>
-          </div>
-          <div class="stats-secondary-item">
-            <span>Sessions logged</span><strong class="num">${sessions.length}</strong>
-          </div>
-          <div class="stats-secondary-item">
-            <span>Chapters remaining</span><strong class="num">${overall.total - overall.read}</strong>
-          </div>
+          <div class="stats-secondary-item"><span>Books started</span><strong class="num">${started}</strong></div>
+          <div class="stats-secondary-item"><span>Sessions logged</span><strong class="num">${sessions.length}</strong></div>
+          <div class="stats-secondary-item"><span>Chapters remaining</span><strong class="num">${overall.total - overall.read}</strong></div>
         </div>
 
         <div class="report-section">
@@ -1296,13 +1112,8 @@
           <div class="stat-books">
             ${sorted.map((s) => `
               <div class="stat-book-row">
-                <div class="stat-book-name">
-                  ${escapeHTML(s.book.name)}
-                  ${s.finished ? '<span class="book-badge sm"><i class="fa-solid fa-check"></i></span>' : ''}
-                </div>
-                <div class="stat-book-track">
-                  <div class="stat-book-fill" style="width:${s.percent}%"></div>
-                </div>
+                <div class="stat-book-name">${escapeHTML(s.book.name)} ${s.finished ? '<span class="book-badge sm"><i class="fa-solid fa-check"></i></span>' : ''}</div>
+                <div class="stat-book-track"><div class="stat-book-fill" style="width:${s.percent}%"></div></div>
                 <div class="stat-book-pct num">${s.percent}%</div>
               </div>
             `).join('')}
@@ -1311,29 +1122,25 @@
 
         ${!state.readOnly ? `
         <div class="view-footer-actions">
-          <button class="btn-ghost" id="statsPrintBtn">
-            <i class="fa-solid fa-print"></i> Print report
-          </button>
+          <button class="btn-ghost" id="statsPrintBtn"><i class="fa-solid fa-print"></i> Print report</button>
         </div>` : ''}
       </div>
     `;
 
     root.querySelector('[data-act="back"]').addEventListener('click', closeView);
-
     const printBtn = root.querySelector('#statsPrintBtn');
     if (printBtn) printBtn.addEventListener('click', () => printProgressReport());
   }
 
   function printProgressReport() {
+    // Keeping your original print logic untouched
     const data = state.data;
     const overall = Storage.overallProgress(data);
     const finished = Storage.booksFinished(data);
     const started = Storage.booksStarted(data);
     const sessions = data.sessions || [];
 
-    const issued = new Date().toLocaleDateString(undefined, {
-      year: 'numeric', month: 'long', day: 'numeric'
-    });
+    const issued = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 
     const rows = BibleBooks.all.map((b) => {
       const p = Storage.bookProgress(data, b.id);
@@ -1358,131 +1165,41 @@
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --ink: #12161E;
-    --ink-soft: #4A5160;
-    --muted: #8A8F9C;
-    --line: #E4E1D9;
-    --line-soft: #EFEDE5;
-    --indigo: #2A3F6B;
-    --gold: #B8860B;
-    --bg: #F5F2EA;
+    --ink: #12161E; --ink-soft: #4A5160; --muted: #8A8F9C;
+    --line: #E4E1D9; --line-soft: #EFEDE5; --indigo: #2A3F6B;
+    --gold: #B8860B; --bg: #F5F2EA;
   }
   * { box-sizing: border-box; }
-  html, body {
-    margin: 0; padding: 0;
-    background: var(--bg); color: var(--ink);
-    font-family: 'IBM Plex Sans', system-ui, sans-serif;
-    font-size: 14px; line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  .rpt-toolbar {
-    position: sticky; top: 0;
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; padding: 12px 20px;
-    background: #fff; border-bottom: 1px solid var(--line-soft); z-index: 10;
-  }
-  .rpt-toolbar-title {
-    font-family: 'Sora', sans-serif; font-size: 13px; font-weight: 700;
-    color: var(--indigo);
-  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .rpt-toolbar { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid var(--line-soft); z-index: 10; }
+  .rpt-toolbar-title { font-family: 'Sora', sans-serif; font-size: 13px; font-weight: 700; color: var(--indigo); }
   .rpt-toolbar-actions { display: flex; gap: 8px; }
-  .rpt-btn {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 9px 16px; border-radius: 999px;
-    font-family: 'Sora', sans-serif; font-size: 13px; font-weight: 700;
-    border: none; cursor: pointer;
-  }
-  .rpt-btn.primary { background: var(--indigo); color: #fff; }
-  .rpt-btn.primary:hover { background: #1F3050; }
+  .rpt-btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; font-family: 'Sora', sans-serif; font-size: 13px; font-weight: 700; border: none; cursor: pointer; }
+  .rpt-btn.primary { background: var(--indigo); color: #fff; } .rpt-btn.primary:hover { background: #1F3050; }
   .rpt-btn.ghost { background: #F1EFEA; color: var(--ink-soft); }
-  .rpt-page {
-    max-width: 800px; margin: 28px auto;
-    background: #fff; padding: 48px 56px 56px;
-    box-shadow: 0 4px 24px rgba(18, 22, 30, 0.06);
-    border-radius: 4px;
-  }
-  .rpt-header {
-    text-align: center; padding-bottom: 24px;
-    border-bottom: 2px solid var(--indigo); margin-bottom: 28px;
-  }
-  .rpt-title {
-    font-family: 'Sora', sans-serif; font-size: 26px; font-weight: 800;
-    color: var(--indigo); letter-spacing: -0.01em; margin: 0 0 6px;
-  }
-  .rpt-sub {
-    font-size: 13px; color: var(--ink-soft); letter-spacing: 0.02em;
-  }
-  .rpt-summary {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    gap: 16px; padding: 22px 0;
-    border-bottom: 1px solid var(--line-soft); margin-bottom: 28px;
-  }
+  .rpt-page { max-width: 800px; margin: 28px auto; background: #fff; padding: 48px 56px 56px; box-shadow: 0 4px 24px rgba(18, 22, 30, 0.06); border-radius: 4px; }
+  .rpt-header { text-align: center; padding-bottom: 24px; border-bottom: 2px solid var(--indigo); margin-bottom: 28px; }
+  .rpt-title { font-family: 'Sora', sans-serif; font-size: 26px; font-weight: 800; color: var(--indigo); letter-spacing: -0.01em; margin: 0 0 6px; }
+  .rpt-sub { font-size: 13px; color: var(--ink-soft); letter-spacing: 0.02em; }
+  .rpt-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 22px 0; border-bottom: 1px solid var(--line-soft); margin-bottom: 28px; }
   .rpt-summary-item { display: flex; flex-direction: column; gap: 4px; }
-  .rpt-summary-item span {
-    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.1em; color: var(--muted);
-  }
-  .rpt-summary-item strong {
-    font-family: 'Sora', sans-serif; font-size: 22px; font-weight: 800;
-    color: var(--indigo); font-variant-numeric: tabular-nums;
-    letter-spacing: -0.01em;
-  }
-  .rpt-section-title {
-    font-family: 'Sora', sans-serif;
-    font-size: 12px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.1em; color: var(--muted);
-    margin: 0 0 12px;
-  }
+  .rpt-summary-item span { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+  .rpt-summary-item strong { font-family: 'Sora', sans-serif; font-size: 22px; font-weight: 800; color: var(--indigo); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .rpt-section-title { font-family: 'Sora', sans-serif; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 0 0 12px; }
   .rpt-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
-  .rpt-table thead th {
-    font-family: 'Sora', sans-serif; font-size: 10.5px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
-    text-align: left; padding: 10px 8px;
-    border-bottom: 1.5px solid var(--indigo);
-  }
-  .rpt-table thead th.col-num,
-  .rpt-table thead th.col-status { text-align: right; }
-  .rpt-table tbody td {
-    padding: 9px 8px; border-bottom: 1px solid var(--line-soft);
-    font-size: 13px; color: var(--ink); vertical-align: middle;
-  }
+  .rpt-table thead th { font-family: 'Sora', sans-serif; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); text-align: left; padding: 10px 8px; border-bottom: 1.5px solid var(--indigo); }
+  .rpt-table thead th.col-num, .rpt-table thead th.col-status { text-align: right; }
+  .rpt-table tbody td { padding: 9px 8px; border-bottom: 1px solid var(--line-soft); font-size: 13px; color: var(--ink); vertical-align: middle; }
   .rpt-table tbody tr:nth-child(even) td { background: #FAFAF7; }
   .rpt-table tbody td.col-num { text-align: right; font-variant-numeric: tabular-nums; }
   .rpt-table tbody td.col-status { text-align: right; }
-  .rpt-table tbody td.col-test {
-    font-size: 11px; font-weight: 700; color: var(--muted);
-    letter-spacing: 0.06em;
-  }
-  .chk {
-    display: inline-grid; place-items: center;
-    width: 18px; height: 18px; border-radius: 50%;
-    background: var(--gold); color: #fff;
-    font-size: 11px; font-weight: 800;
-  }
-  .rpt-footer {
-    display: flex; align-items: flex-end; justify-content: space-between;
-    gap: 24px; margin-top: 40px;
-    padding-top: 18px; border-top: 1px solid var(--line-soft);
-  }
-  .rpt-credit {
-    font-size: 10.5px; color: var(--muted); letter-spacing: 0.04em;
-  }
-  .rpt-credit strong { color: var(--indigo); font-weight: 700; }
+  .rpt-table tbody td.col-test { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.06em; }
+  .chk { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--gold); color: #fff; font-size: 11px; font-weight: 800; }
+  .rpt-footer { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+  .rpt-credit { font-size: 10.5px; color: var(--muted); letter-spacing: 0.04em; } .rpt-credit strong { color: var(--indigo); font-weight: 700; }
   @page { size: A4; margin: 18mm 16mm; }
-  @media print {
-    html, body { background: #fff; }
-    .rpt-toolbar { display: none; }
-    .rpt-page {
-      max-width: none; margin: 0; padding: 0;
-      box-shadow: none; border-radius: 0;
-    }
-    .rpt-table tr { page-break-inside: avoid; }
-  }
-  @media (max-width: 640px) {
-    .rpt-page { padding: 28px 20px; margin: 12px; }
-    .rpt-title { font-size: 20px; }
-    .rpt-summary { grid-template-columns: 1fr 1fr; }
-  }
+  @media print { html, body { background: #fff; } .rpt-toolbar { display: none; } .rpt-page { max-width: none; margin: 0; padding: 0; box-shadow: none; border-radius: 0; } .rpt-table tr { page-break-inside: avoid; } }
+  @media (max-width: 640px) { .rpt-page { padding: 28px 20px; margin: 12px; } .rpt-title { font-size: 20px; } .rpt-summary { grid-template-columns: 1fr 1fr; } }
 </style>
 </head>
 <body>
@@ -1490,61 +1207,25 @@
   <div class="rpt-toolbar-title">Progress Report Preview</div>
   <div class="rpt-toolbar-actions">
     <button class="rpt-btn ghost" onclick="window.close()">Close</button>
-    <button class="rpt-btn primary" onclick="window.print()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
-      Save as PDF
-    </button>
+    <button class="rpt-btn primary" onclick="window.print()">Save as PDF</button>
   </div>
 </div>
-
 <main class="rpt-page">
-  <header class="rpt-header">
-    <h1 class="rpt-title">Bible Reading Progress</h1>
-    <div class="rpt-sub">${escapeHTML(issued)}</div>
-  </header>
-
+  <header class="rpt-header"><h1 class="rpt-title">Bible Reading Progress</h1><div class="rpt-sub">${escapeHTML(issued)}</div></header>
   <div class="rpt-summary">
-    <div class="rpt-summary-item">
-      <span>Bible read</span>
-      <strong>${overall.percent}%</strong>
-    </div>
-    <div class="rpt-summary-item">
-      <span>Chapters</span>
-      <strong>${overall.read} / ${overall.total}</strong>
-    </div>
-    <div class="rpt-summary-item">
-      <span>Books finished</span>
-      <strong>${finished.length} / 66</strong>
-    </div>
-    <div class="rpt-summary-item">
-      <span>Books started</span>
-      <strong>${started}</strong>
-    </div>
+    <div class="rpt-summary-item"><span>Bible read</span><strong>${overall.percent}%</strong></div>
+    <div class="rpt-summary-item"><span>Chapters</span><strong>${overall.read} / ${overall.total}</strong></div>
+    <div class="rpt-summary-item"><span>Books finished</span><strong>${finished.length} / 66</strong></div>
+    <div class="rpt-summary-item"><span>Books started</span><strong>${started}</strong></div>
   </div>
-
   <h2 class="rpt-section-title">Progress by book</h2>
   <table class="rpt-table">
-    <thead>
-      <tr>
-        <th class="col-name">Book</th>
-        <th class="col-test">T</th>
-        <th class="col-num">Chapters</th>
-        <th class="col-num">Percent</th>
-        <th class="col-status"></th>
-      </tr>
-    </thead>
-    <tbody>
-      ${rows}
-    </tbody>
+    <thead><tr><th class="col-name">Book</th><th class="col-test">T</th><th class="col-num">Chapters</th><th class="col-num">Percent</th><th class="col-status"></th></tr></thead>
+    <tbody>${rows}</tbody>
   </table>
-
   <footer class="rpt-footer">
-    <div class="rpt-credit">
-      Generated by <strong>Selah</strong> · ${escapeHTML(issued)}
-    </div>
-    <div class="rpt-credit">
-      ${sessions.length} session${sessions.length === 1 ? '' : 's'} logged
-    </div>
+    <div class="rpt-credit">Generated by <strong>Selah</strong> · ${escapeHTML(issued)}</div>
+    <div class="rpt-credit">${sessions.length} session${sessions.length === 1 ? '' : 's'} logged</div>
   </footer>
 </main>
 </body>
@@ -1553,21 +1234,13 @@
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const win = window.open(url, '_blank');
-
-    if (!win) {
-      toast('Please allow pop-ups to view the report', {
-        type: 'warn', icon: 'fa-triangle-exclamation', duration: 6000
-      });
-      return;
-    }
-
+    if (!win) { toast('Please allow pop-ups to view the report', { type: 'warn', icon: 'fa-triangle-exclamation', duration: 6000 }); return; }
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
-  /* ============================================================ */
-  /* BADGES                                                       */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* BADGES                                                      */
+  /* ---------------------------------------------------------- */
   function renderBadgesView(root) {
     const data = state.data;
     const finished = new Set(Storage.booksFinished(data));
@@ -1575,15 +1248,11 @@
     const tiles = BibleBooks.all.map((b) => {
       const unlocked = finished.has(b.id);
       const date = unlocked ? Storage.bookCompletionDate(data, b.id) : null;
-      const dateStr = date
-        ? new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-        : '';
+      const dateStr = date ? new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
 
       return `
         <div class="badge-tile ${unlocked ? 'unlocked' : 'locked'}">
-          <div class="badge-medal">
-            <i class="fa-solid ${unlocked ? 'fa-award' : 'fa-lock'}"></i>
-          </div>
+          <div class="badge-medal"><i class="fa-solid ${unlocked ? 'fa-award' : 'fa-lock'}"></i></div>
           <div class="badge-name">${escapeHTML(b.name)}</div>
           <div class="badge-sub">${unlocked ? escapeHTML(dateStr) : b.chapters + ' ch'}</div>
         </div>`;
@@ -1593,35 +1262,27 @@
       ${viewHeaderHTML('Badges')}
       <div class="view-body">
         <div class="badges-intro">
-          <div class="badges-count">
-            <span class="num">${finished.size}</span> of 66 books completed
-          </div>
-          <div class="badges-track">
-            <div class="badges-fill" style="width:${Math.round((finished.size / 66) * 100)}%"></div>
-          </div>
+          <div class="badges-count"><span class="num">${finished.size}</span> of 66 books completed</div>
+          <div class="badges-track"><div class="badges-fill" style="width:${Math.round((finished.size / 66) * 100)}%"></div></div>
         </div>
-        <div class="badges-grid">
-          ${tiles}
-        </div>
+        <div class="badges-grid">${tiles}</div>
       </div>
     `;
-
     root.querySelector('[data-act="back"]').addEventListener('click', closeView);
   }
 
-  /* ============================================================ */
-  /* SETTINGS                                                     */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* SETTINGS (Cleanup Applied)                                  */
+  /* ---------------------------------------------------------- */
   function renderSettingsView(root) {
-    const data = state.data;
-    const settings = data.settings || {};
     const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
     const ro = state.readOnly;
+    const lastSync = localStorage.getItem(SYNC_TIME_KEY);
 
     root.innerHTML = `
       ${viewHeaderHTML('Settings')}
       <div class="view-body">
+        
         <section class="settings-section">
           <div class="settings-section-title">Theme</div>
           <div class="theme-circle-row">
@@ -1637,6 +1298,62 @@
           </div>
           <div class="settings-section-hint">Tap a circle to switch — your choice is saved on this device.</div>
         </section>
+
+        ${!ro ? `
+        <section class="settings-section">
+          <div class="settings-section-title">Sync & Notifications</div>
+          <div class="settings-card">
+            <div class="drive-block">
+              <label class="drive-field">
+                <span class="drive-field-label">Sync Token</span>
+                <input type="password" id="syncTokenInput" value="${localStorage.getItem(SYNC_TOKEN_KEY) || DEFAULT_SYNC_TOKEN}" autocomplete="off">
+              </label>
+              <div class="drive-actions">
+                <button class="drive-btn primary" id="syncNowBtn"><i class="fa-solid fa-rotate"></i><span>Sync Now</span></button>
+                <button class="drive-btn" id="enablePushBtn"><i class="fa-solid fa-bell"></i><span>Enable Notifications</span></button>
+              </div>
+              <div class="drive-status" id="syncStatusBox" style="color:var(--text-soft);">${lastSync ? 'Last synced ' + relativeTime(lastSync) : 'Not synced yet'}</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title">Data & Storage</div>
+          <div class="settings-card">
+            <button class="settings-row" data-act="force-sync">
+              <i class="fa-solid fa-rotate"></i>
+              <div class="settings-row-text">
+                <div class="settings-row-title">Force Sync</div>
+                <div class="settings-row-sub">Push and pull data from Cjay Cloud</div>
+              </div>
+              <i class="fa-solid fa-chevron-right settings-row-chevron"></i>
+            </button>
+            <button class="settings-row" data-act="backup">
+              <i class="fa-solid fa-file-export"></i>
+              <div class="settings-row-text">
+                <div class="settings-row-title">Export All Data</div>
+                <div class="settings-row-sub">Download a full JSON backup of every session</div>
+              </div>
+              <i class="fa-solid fa-chevron-right settings-row-chevron"></i>
+            </button>
+          </div>
+        </section>
+        ` : ''}
+
+        <section class="settings-section">
+          <div class="settings-section-title">Help & Feedback</div>
+          <div class="settings-card">
+            <a href="https://github.com/Only1Cjay/Selah" target="_blank" class="settings-row" style="text-decoration:none;">
+              <i class="fa-brands fa-github"></i>
+              <div class="settings-row-text">
+                <div class="settings-row-title">View on GitHub</div>
+                <div class="settings-row-sub">Report bugs or view the source code</div>
+              </div>
+              <i class="fa-solid fa-arrow-up-right-from-square settings-row-chevron" style="font-size:10px;"></i>
+            </a>
+          </div>
+        </section>
+
         <section class="settings-section">
           <div class="settings-section-title">About</div>
           <div class="settings-card">
@@ -1647,53 +1364,8 @@
                 <div class="settings-row-sub" id="appVersion">Loading…</div>
               </div>
             </div>
-            <div class="settings-row static">
-              <i class="fa-solid fa-database"></i>
-              <div class="settings-row-text">
-                <div class="settings-row-title">Stored locally</div>
-                <div class="settings-row-sub">Your data never leaves this device unless you enable Drive sync</div>
-              </div>
-            </div>
-            <div class="settings-row static">
-              <i class="fa-solid fa-bible"></i>
-              <div class="settings-row-text">
-                <div class="settings-row-title">66 books · 1189 chapters</div>
-                <div class="settings-row-sub">Canonical order, Old & New Testaments</div>
-              </div>
-            </div>
           </div>
         </section>
-
-        ${!ro ? `
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div class="settings-section-title">Google Drive</div>
-            <button class="settings-section-help" id="driveHelp" aria-label="Help">
-              <i class="fa-solid fa-circle-question"></i>
-            </button>
-          </div>
-          <div class="settings-card">
-            <div class="drive-block">
-              <label class="drive-field">
-                <span class="drive-field-label">OAuth Client ID</span>
-                <input type="text" id="driveClientId" placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false" autocapitalize="off">
-              </label>
-              <div class="drive-actions">
-                <button class="drive-btn" data-act="drive-connect" id="driveConnectBtn">
-                  <i class="fa-solid fa-plug"></i><span>Connect</span>
-                </button>
-                <button class="drive-btn primary" data-act="drive-push" id="drivePushBtn">
-                  <i class="fa-solid fa-cloud-arrow-up"></i><span>Push</span>
-                </button>
-                <button class="drive-btn" data-act="drive-pull" id="drivePullBtn">
-                  <i class="fa-solid fa-cloud-arrow-down"></i><span>Pull</span>
-                </button>
-              </div>
-              <div class="drive-status" id="driveStatus">Not connected</div>
-            </div>
-          </div>
-        </section>
-        ` : ''}
 
         ${!ro ? `
         <section class="settings-section">
@@ -1722,7 +1394,6 @@
       if (el) el.textContent = v;
     });
 
-    // Theme circles
     root.querySelectorAll('.theme-circle').forEach((circle) => {
       circle.addEventListener('click', () => {
         const id = circle.dataset.themeId;
@@ -1732,42 +1403,31 @@
           Storage.updateSettings({ theme: id });
           state.data = Storage.getData();
         }
-        root.querySelectorAll('.theme-circle').forEach((c) => {
-          c.classList.toggle('active', c.dataset.themeId === id);
-        });
+        root.querySelectorAll('.theme-circle').forEach((c) => c.classList.toggle('active', c.dataset.themeId === id));
       });
     });
 
-    // Danger zone
+    // Sync Logic
+    const syncTokenInput = root.querySelector('#syncTokenInput');
+    if (syncTokenInput) {
+      syncTokenInput.addEventListener('change', () => {
+        const val = syncTokenInput.value.trim();
+        if (val) {
+          localStorage.setItem(SYNC_TOKEN_KEY, val);
+          toast('Token saved', { type: 'success' });
+        }
+      });
+      root.querySelector('#syncNowBtn').addEventListener('click', () => syncToWorker());
+    }
+
+    const forceSyncRow = root.querySelector('[data-act="force-sync"]');
+    if (forceSyncRow) forceSyncRow.addEventListener('click', () => { closeView(); syncToWorker(); });
+
+    const exportRow = root.querySelector('[data-act="backup"]');
+    if (exportRow) exportRow.addEventListener('click', () => { closeView(); backupToFile(); });
+
     const resetBtn = root.querySelector('[data-act="reset-all"]');
-    if (resetBtn) {
-      resetBtn.addEventListener('click', () => {
-        closeView();
-        setTimeout(() => confirmResetAll(), 100);
-      });
-    }
-
-    // Drive block
-    const driveInput = root.querySelector('#driveClientId');
-    if (driveInput) {
-      driveInput.value = getStoredClientId();
-
-      driveInput.addEventListener('blur', () => {
-        setStoredClientId(driveInput.value);
-        updateDriveStatus();
-      });
-      driveInput.addEventListener('change', () => {
-        setStoredClientId(driveInput.value);
-        updateDriveStatus();
-      });
-
-      root.querySelector('#driveHelp').addEventListener('click', openDriveHelp);
-      root.querySelector('#driveConnectBtn').addEventListener('click', driveConnect);
-      root.querySelector('#drivePushBtn').addEventListener('click', drivePush);
-      root.querySelector('#drivePullBtn').addEventListener('click', drivePull);
-
-      updateDriveStatus();
-    }
+    if (resetBtn) resetBtn.addEventListener('click', () => { closeView(); setTimeout(() => confirmResetAll(), 100); });
   }
 
   async function getAppVersion() {
@@ -1776,15 +1436,12 @@
       const text = await res.text();
       const m = text.match(/CACHE_VERSION\s*=\s*['"]([^'"]+)['"]/);
       return m ? `v${m[1].replace(/^v/, '')}` : 'unknown';
-    } catch {
-      return 'unknown';
-    }
+    } catch { return 'unknown'; }
   }
 
-  /* ============================================================ */
-  /* TOOLS + BACKUP + RESTORE + CSV                               */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* TOOLS (Added Drive button, updated naming)                  */
+  /* ---------------------------------------------------------- */
   function openToolsSheet() {
     const ro = state.readOnly;
     const sheet = document.createElement('div');
@@ -1794,24 +1451,31 @@
       <h3 class="sheet-title">Tools</h3>
       <div class="tools-grid">
         <button class="tool-tile" data-act="backup" ${ro ? 'disabled' : ''}>
-          <i class="fa-solid fa-cloud-arrow-up"></i><span>Backup</span>
+          <i class="fa-solid fa-cloud-arrow-up"></i><span>Export JSON</span>
         </button>
         <button class="tool-tile" data-act="restore" ${ro ? 'disabled' : ''}>
-          <i class="fa-solid fa-cloud-arrow-down"></i><span>Restore</span>
+          <i class="fa-solid fa-cloud-arrow-down"></i><span>Import JSON</span>
         </button>
         <button class="tool-tile" data-act="export" ${ro ? 'disabled' : ''}>
           <i class="fa-solid fa-file-export"></i><span>Export CSV</span>
         </button>
         <button class="tool-tile" data-act="print">
-          <i class="fa-solid fa-print"></i><span>Print</span>
+          <i class="fa-solid fa-print"></i><span>Print Report</span>
+        </button>
+        <button class="tool-tile" data-act="drive" ${ro ? 'disabled' : ''}>
+          <i class="fa-brands fa-google-drive"></i><span>Google Drive</span>
         </button>
         <button class="tool-tile danger" data-act="clear-data" ${ro ? 'disabled' : ''}>
           <i class="fa-solid fa-trash-can"></i><span>Clear Data</span>
         </button>
       </div>
+      <div class="sheet-actions">
+        <button class="btn-ghost" data-act="cancel">Close</button>
+      </div>
     `;
     openModal(sheet);
 
+    sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
     sheet.querySelectorAll('.tool-tile').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (btn.disabled) return;
@@ -1822,13 +1486,55 @@
     });
   }
 
+  /* ---------------------------------------------------------- */
+  /* DRIVE MODAL                                                 */
+  /* ---------------------------------------------------------- */
+  function openDriveModal() {
+    const sheet = document.createElement('div');
+    sheet.className = 'modal-sheet';
+    sheet.innerHTML = `
+      <div class="sheet-handle"></div>
+      <h3 class="sheet-title">Google Drive Backup</h3>
+      <p class="sheet-body">Manually back up and restore your data to Google Drive.</p>
+      
+      <div class="drive-block" style="padding: 0 20px 16px;">
+        <label class="drive-field">
+          <span class="drive-field-label">OAuth Client ID</span>
+          <input type="text" id="driveClientId" placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false" autocapitalize="off">
+        </label>
+        <div class="drive-actions">
+          <button class="drive-btn" id="driveConnectBtn"><i class="fa-solid fa-plug"></i><span>Connect</span></button>
+          <button class="drive-btn primary" id="drivePushBtn"><i class="fa-solid fa-cloud-arrow-up"></i><span>Push</span></button>
+          <button class="drive-btn" id="drivePullBtn"><i class="fa-solid fa-cloud-arrow-down"></i><span>Pull</span></button>
+        </div>
+        <div class="drive-status" id="driveStatus">Not connected</div>
+      </div>
+
+      <div class="sheet-actions">
+        <button class="btn-ghost" data-act="cancel">Close</button>
+      </div>
+    `;
+    openModal(sheet);
+    
+    sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
+    
+    const driveInput = sheet.querySelector('#driveClientId');
+    driveInput.value = getStoredClientId();
+    driveInput.addEventListener('blur', () => { setStoredClientId(driveInput.value); updateDriveStatus(); });
+    driveInput.addEventListener('change', () => { setStoredClientId(driveInput.value); updateDriveStatus(); });
+
+    sheet.querySelector('#driveConnectBtn').addEventListener('click', driveConnect);
+    sheet.querySelector('#drivePushBtn').addEventListener('click', drivePush);
+    sheet.querySelector('#drivePullBtn').addEventListener('click', drivePull);
+    
+    updateDriveStatus();
+  }
+
+  /* ---------------------------------------------------------- */
+  /* BACKUP / RESTORE / CSV / DRIVE LOGIC                        */
+  /* ---------------------------------------------------------- */
   function backupToFile() {
-    const payload = {
-      app: 'selah',
-      schema: 1,
-      exportedAt: new Date().toISOString(),
-      data: Storage.getData()
-    };
+    const payload = { app: 'selah', schema: 1, exportedAt: new Date().toISOString(), data: Storage.getData() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1848,9 +1554,7 @@
         if (!incoming || !Array.isArray(incoming.sessions)) throw new Error('Invalid backup');
         showRestoreChoice(incoming);
       } catch (err) {
-        toast(`Restore failed: ${err.message}`, {
-          type: 'error', icon: 'fa-triangle-exclamation', duration: 6000
-        });
+        toast(`Restore failed: ${err.message}`, { type: 'error', icon: 'fa-triangle-exclamation', duration: 6000 });
       }
     });
   }
@@ -1861,11 +1565,7 @@
     sheet.innerHTML = `
       <div class="sheet-handle"></div>
       <h3 class="sheet-title">Restore backup</h3>
-      <p class="sheet-body">
-        The backup has <strong>${incoming.sessions.length}</strong>
-        session${incoming.sessions.length === 1 ? '' : 's'}.
-        How should they be applied?
-      </p>
+      <p class="sheet-body">The backup has <strong>${incoming.sessions.length}</strong> session${incoming.sessions.length === 1 ? '' : 's'}. How should they be applied?</p>
       <div class="sheet-actions" style="flex-direction:column;">
         <button class="btn-primary" data-act="replace">Replace everything</button>
         <button class="btn-ghost" data-act="merge">Merge with current</button>
@@ -1873,18 +1573,12 @@
       </div>
     `;
     openModal(sheet);
-
     sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
-
     sheet.querySelector('[data-act="replace"]').addEventListener('click', () => {
       Storage.setData(incoming);
-      closeModal();
-      refresh();
-      toast(`Restored ${incoming.sessions.length} sessions`, {
-        type: 'success', icon: 'fa-cloud-arrow-down'
-      });
+      closeModal(); refresh();
+      toast(`Restored ${incoming.sessions.length} sessions`, { type: 'success', icon: 'fa-cloud-arrow-down' });
     });
-
     sheet.querySelector('[data-act="merge"]').addEventListener('click', () => {
       const current = Storage.getData();
       const byId = new Map(current.sessions.map((s) => [s.id, s]));
@@ -1895,34 +1589,19 @@
       });
       current.sessions = Array.from(byId.values());
       Storage.setData(current);
-      closeModal();
-      refresh();
-      toast(`Merged: ${added} new, ${updated} updated`, {
-        type: 'success', icon: 'fa-cloud-arrow-down'
-      });
+      closeModal(); refresh();
+      toast(`Merged: ${added} new, ${updated} updated`, { type: 'success', icon: 'fa-cloud-arrow-down' });
     });
   }
 
   function exportCSV() {
     const data = state.data;
     const rows = [['Date', 'Book', 'From', 'To', 'Chapters', 'Note']];
-    (data.sessions || [])
-      .slice()
-      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
-      .forEach((s) => {
-        const book = BibleBooks.get(s.book);
-        rows.push([
-          s.createdAt,
-          book ? book.name : s.book,
-          s.from,
-          s.to,
-          s.to - s.from + 1,
-          s.note || ''
-        ]);
-      });
-    const csv = rows.map((r) =>
-      r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')
-    ).join('\n');
+    (data.sessions || []).slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)).forEach((s) => {
+      const book = BibleBooks.get(s.book);
+      rows.push([s.createdAt, book ? book.name : s.book, s.from, s.to, s.to - s.from + 1, s.note || '']);
+    });
+    const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1953,14 +1632,8 @@
     sheet.innerHTML = `
       <div class="sheet-handle"></div>
       <h3 class="sheet-title">Reset all data?</h3>
-      <p class="sheet-body">
-        This will permanently delete <strong>every session</strong>.
-        Your reading progress will be cleared. Back up first if you're unsure.
-      </p>
-      <label class="confirm-input-label">
-        Type <code>DELETE</code> to confirm
-        <input type="text" id="confirmResetInput" autocomplete="off" autocapitalize="characters" spellcheck="false">
-      </label>
+      <p class="sheet-body">This will permanently delete <strong>every session</strong>. Your reading progress will be cleared. Back up first if you're unsure.</p>
+      <label class="confirm-input-label">Type <code>DELETE</code> to confirm<input type="text" id="confirmResetInput" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
       <div class="sheet-actions">
         <button class="btn-ghost" data-act="cancel">Cancel</button>
         <button class="btn-danger" data-act="confirm" disabled>Reset</button>
@@ -1970,11 +1643,7 @@
 
     const input = sheet.querySelector('#confirmResetInput');
     const confirmBtn = sheet.querySelector('[data-act="confirm"]');
-
-    input.addEventListener('input', () => {
-      confirmBtn.disabled = input.value.trim().toUpperCase() !== 'DELETE';
-    });
-
+    input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim().toUpperCase() !== 'DELETE'; });
     sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
     confirmBtn.addEventListener('click', () => {
       Storage.reset();
@@ -1985,10 +1654,9 @@
     });
   }
 
-  /* ============================================================ */
-  /* DRIVE SYNC                                                   */
-  /* ============================================================ */
-
+  /* ---------------------------------------------------------- */
+  /* DRIVE SYNC LOGIC                                            */
+  /* ---------------------------------------------------------- */
   const DRIVE = {
     clientIdKey: 'cjay_gdrive_client_id',
     lastSyncKey: 'selah_last_sync',
@@ -2002,10 +1670,7 @@
     initPromise: null
   };
 
-  function getStoredClientId() {
-    return localStorage.getItem(DRIVE.clientIdKey) || '';
-  }
-
+  function getStoredClientId() { return localStorage.getItem(DRIVE.clientIdKey) || ''; }
   function setStoredClientId(id) {
     if (id) localStorage.setItem(DRIVE.clientIdKey, id.trim());
     else localStorage.removeItem(DRIVE.clientIdKey);
@@ -2015,11 +1680,7 @@
     DRIVE.token = null;
     DRIVE.initPromise = null;
   }
-
-  function getLastSync() {
-    return localStorage.getItem(DRIVE.lastSyncKey) || '';
-  }
-
+  function getLastSync() { return localStorage.getItem(DRIVE.lastSyncKey) || ''; }
   function setLastSync(iso) {
     localStorage.setItem(DRIVE.lastSyncKey, iso);
     Storage.updateSettings({ lastSync: iso });
@@ -2029,15 +1690,9 @@
     return new Promise((resolve, reject) => {
       const start = Date.now();
       const check = () => {
-        if (typeof gapi !== 'undefined' &&
-            typeof google !== 'undefined' &&
-            google.accounts && google.accounts.oauth2) {
-          resolve();
-        } else if (Date.now() - start > timeoutMs) {
-          reject(new Error('Google libraries failed to load'));
-        } else {
-          setTimeout(check, 150);
-        }
+        if (typeof gapi !== 'undefined' && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) resolve();
+        else if (Date.now() - start > timeoutMs) reject(new Error('Google libraries failed to load'));
+        else setTimeout(check, 150);
       };
       check();
     });
@@ -2045,26 +1700,17 @@
 
   function initDrive() {
     if (DRIVE.initPromise) return DRIVE.initPromise;
-
     DRIVE.initPromise = (async () => {
       const clientId = getStoredClientId();
       if (!clientId) throw new Error('No client ID');
-
       await waitForGlobals();
-
       if (!DRIVE.gapiReady) {
         await new Promise((resolve, reject) => {
-          gapi.load('client', {
-            callback: resolve,
-            onerror: () => reject(new Error('gapi.load failed'))
-          });
+          gapi.load('client', { callback: resolve, onerror: () => reject(new Error('gapi.load failed')) });
         });
-        await gapi.client.init({
-          discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
-        });
+        await gapi.client.init({ discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'] });
         DRIVE.gapiReady = true;
       }
-
       if (!DRIVE.tokenClient) {
         DRIVE.tokenClient = google.accounts.oauth2.initTokenClient({
           client_id: clientId,
@@ -2072,10 +1718,8 @@
           callback: () => {}
         });
       }
-
       return true;
     })();
-
     DRIVE.initPromise.catch(() => { DRIVE.initPromise = null; });
     return DRIVE.initPromise;
   }
@@ -2084,44 +1728,30 @@
     return new Promise((resolve, reject) => {
       if (DRIVE.token && !forcePrompt) return resolve(DRIVE.token);
       if (!DRIVE.tokenClient) return reject(new Error('Drive not initialised'));
-
       DRIVE.tokenClient.callback = (resp) => {
         if (resp.error) return reject(new Error(resp.error));
         DRIVE.token = resp.access_token;
         gapi.client.setToken({ access_token: resp.access_token });
         resolve(resp.access_token);
       };
-
       DRIVE.tokenClient.requestAccessToken({ prompt: forcePrompt ? 'consent' : '' });
     });
   }
 
   async function getOrCreateFolder() {
     if (DRIVE.folderId) return DRIVE.folderId;
-
     const q = `mimeType='application/vnd.google-apps.folder' and name='${DRIVE.folderName}' and trashed=false`;
-    const res = await gapi.client.drive.files.list({
-      q, fields: 'files(id,name)', spaces: 'drive'
-    });
+    const res = await gapi.client.drive.files.list({ q, fields: 'files(id,name)', spaces: 'drive' });
     const files = res.result.files || [];
-    if (files.length) {
-      DRIVE.folderId = files[0].id;
-      return DRIVE.folderId;
-    }
-
-    const create = await gapi.client.drive.files.create({
-      resource: { name: DRIVE.folderName, mimeType: 'application/vnd.google-apps.folder' },
-      fields: 'id'
-    });
+    if (files.length) { DRIVE.folderId = files[0].id; return DRIVE.folderId; }
+    const create = await gapi.client.drive.files.create({ resource: { name: DRIVE.folderName, mimeType: 'application/vnd.google-apps.folder' }, fields: 'id' });
     DRIVE.folderId = create.result.id;
     return DRIVE.folderId;
   }
 
   async function findDriveFile(folderId) {
     const q = `name='${DRIVE.fileName}' and '${folderId}' in parents and trashed=false`;
-    const res = await gapi.client.drive.files.list({
-      q, fields: 'files(id,name,modifiedTime)', spaces: 'drive'
-    });
+    const res = await gapi.client.drive.files.list({ q, fields: 'files(id,name,modifiedTime)', spaces: 'drive' });
     const files = res.result.files || [];
     return files[0] || null;
   }
@@ -2133,9 +1763,7 @@
       toast('Connected to Drive', { type: 'success', icon: 'fa-plug' });
       updateDriveStatus();
     } catch (err) {
-      toast(`Connect failed: ${err.message}`, {
-        type: 'error', icon: 'fa-triangle-exclamation', duration: 6000
-      });
+      toast(`Connect failed: ${err.message}`, { type: 'error', icon: 'fa-triangle-exclamation', duration: 6000 });
     }
   }
 
@@ -2145,30 +1773,12 @@
       await ensureAccessToken();
       const folderId = await getOrCreateFolder();
       const file = await findDriveFile(folderId);
-
-      const payload = JSON.stringify({
-        app: 'selah',
-        schema: 1,
-        exportedAt: new Date().toISOString(),
-        data: Storage.getData()
-      }, null, 2);
-
+      const payload = JSON.stringify({ app: 'selah', schema: 1, exportedAt: new Date().toISOString(), data: Storage.getData() }, null, 2);
       const boundary = '-------selah' + Date.now();
       const delimiter = '\r\n--' + boundary + '\r\n';
       const closeDelim = '\r\n--' + boundary + '--';
-
-      const metadata = file
-        ? { name: DRIVE.fileName }
-        : { name: DRIVE.fileName, parents: [folderId] };
-
-      const body =
-        delimiter +
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-        JSON.stringify(metadata) +
-        delimiter +
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-        payload +
-        closeDelim;
+      const metadata = file ? { name: DRIVE.fileName } : { name: DRIVE.fileName, parents: [folderId] };
+      const body = delimiter + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + delimiter + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + payload + closeDelim;
 
       await gapi.client.request({
         path: file ? `/upload/drive/v3/files/${file.id}` : '/upload/drive/v3/files',
@@ -2177,14 +1787,11 @@
         headers: { 'Content-Type': `multipart/related; boundary="${boundary}"` },
         body
       });
-
       setLastSync(new Date().toISOString());
       updateDriveStatus();
       toast('Pushed to Drive', { type: 'success', icon: 'fa-cloud-arrow-up' });
     } catch (err) {
-      toast(`Push failed: ${err.message}`, {
-        type: 'error', icon: 'fa-triangle-exclamation', duration: 6000
-      });
+      toast(`Push failed: ${err.message}`, { type: 'error', icon: 'fa-triangle-exclamation', duration: 6000 });
     }
   }
 
@@ -2194,49 +1801,27 @@
       await ensureAccessToken();
       const folderId = await getOrCreateFolder();
       const file = await findDriveFile(folderId);
+      if (!file) { toast('No Drive backup found', { type: 'info', icon: 'fa-circle-info' }); return; }
 
-      if (!file) {
-        toast('No Drive backup found', { type: 'info', icon: 'fa-circle-info' });
-        return;
-      }
-
-      const res = await gapi.client.drive.files.get({
-        fileId: file.id,
-        alt: 'media'
-      });
-
+      const res = await gapi.client.drive.files.get({ fileId: file.id, alt: 'media' });
       const raw = typeof res.body === 'string' ? res.body : JSON.stringify(res.result);
       const parsed = JSON.parse(raw);
       const incoming = parsed.data || parsed;
-
-      if (!incoming || !Array.isArray(incoming.sessions)) {
-        throw new Error('Invalid backup on Drive');
-      }
-
+      if (!incoming || !Array.isArray(incoming.sessions)) throw new Error('Invalid backup on Drive');
       showDrivePullChoice(incoming, file.modifiedTime);
     } catch (err) {
-      toast(`Pull failed: ${err.message}`, {
-        type: 'error', icon: 'fa-triangle-exclamation', duration: 6000
-      });
+      toast(`Pull failed: ${err.message}`, { type: 'error', icon: 'fa-triangle-exclamation', duration: 6000 });
     }
   }
 
   function showDrivePullChoice(incoming, modifiedTime) {
-    const modifiedLabel = modifiedTime
-      ? new Date(modifiedTime).toLocaleString()
-      : 'unknown';
-
+    const modifiedLabel = modifiedTime ? new Date(modifiedTime).toLocaleString() : 'unknown';
     const sheet = document.createElement('div');
     sheet.className = 'modal-sheet confirm-sheet';
     sheet.innerHTML = `
       <div class="sheet-handle"></div>
       <h3 class="sheet-title">Pull from Drive</h3>
-      <p class="sheet-body">
-        Cloud backup has <strong>${incoming.sessions.length}</strong>
-        session${incoming.sessions.length === 1 ? '' : 's'}
-        (last modified ${escapeHTML(modifiedLabel)}).
-        How should they be applied?
-      </p>
+      <p class="sheet-body">Cloud backup has <strong>${incoming.sessions.length}</strong> session${incoming.sessions.length === 1 ? '' : 's'} (last modified ${escapeHTML(modifiedLabel)}). How should they be applied?</p>
       <div class="sheet-actions" style="flex-direction:column;">
         <button class="btn-primary" data-act="replace">Replace everything</button>
         <button class="btn-ghost" data-act="merge">Merge with current</button>
@@ -2244,20 +1829,13 @@
       </div>
     `;
     openModal(sheet);
-
     sheet.querySelector('[data-act="cancel"]').addEventListener('click', closeModal);
-
     sheet.querySelector('[data-act="replace"]').addEventListener('click', () => {
       Storage.setData(incoming);
       setLastSync(new Date().toISOString());
-      closeModal();
-      refresh();
-      updateDriveStatus();
-      toast(`Restored ${incoming.sessions.length} sessions`, {
-        type: 'success', icon: 'fa-cloud-arrow-down'
-      });
+      closeModal(); refresh(); updateDriveStatus();
+      toast(`Restored ${incoming.sessions.length} sessions`, { type: 'success', icon: 'fa-cloud-arrow-down' });
     });
-
     sheet.querySelector('[data-act="merge"]').addEventListener('click', () => {
       const current = Storage.getData();
       const byId = new Map(current.sessions.map((s) => [s.id, s]));
@@ -2269,12 +1847,8 @@
       current.sessions = Array.from(byId.values());
       Storage.setData(current);
       setLastSync(new Date().toISOString());
-      closeModal();
-      refresh();
-      updateDriveStatus();
-      toast(`Merged: ${added} new, ${updated} updated`, {
-        type: 'success', icon: 'fa-cloud-arrow-down'
-      });
+      closeModal(); refresh(); updateDriveStatus();
+      toast(`Merged: ${added} new, ${updated} updated`, { type: 'success', icon: 'fa-cloud-arrow-down' });
     });
   }
 
@@ -2283,36 +1857,9 @@
     if (!el) return;
     const clientId = getStoredClientId();
     const lastSync = getLastSync();
-
-    if (!clientId) {
-      el.textContent = 'Paste your Client ID to enable sync';
-    } else if (!lastSync) {
-      el.textContent = 'Ready to sync';
-    } else {
-      el.textContent = `Last synced ${relativeTime(lastSync)}`;
-    }
-  }
-
-  function openDriveHelp() {
-    const sheet = document.createElement('div');
-    sheet.className = 'modal-sheet';
-    sheet.innerHTML = `
-      <div class="sheet-handle"></div>
-      <h3 class="sheet-title">Where do I get a Client ID?</h3>
-      <div class="sheet-body" style="line-height:1.6; font-size:13.5px;">
-        <p style="margin:0 0 12px;">Selah syncs via Google Drive using an OAuth Client ID you own. It never leaves your device — stored only in this browser.</p>
-        <p style="margin:0 0 8px;"><strong>1.</strong> Go to <code>console.cloud.google.com</code> → APIs &amp; Services → Credentials.</p>
-        <p style="margin:0 0 8px;"><strong>2.</strong> Create an <strong>OAuth client ID</strong> of type <em>Web application</em>.</p>
-        <p style="margin:0 0 8px;"><strong>3.</strong> Under <em>Authorized JavaScript origins</em>, add your GitHub Pages URL (and <code>http://localhost</code> for dev).</p>
-        <p style="margin:0 0 8px;"><strong>4.</strong> Copy the Client ID (ends in <code>.apps.googleusercontent.com</code>) and paste it above.</p>
-        <p style="margin:0; color:var(--muted);">If you've already set up Drive sync in another CJay app, reuse the same Client ID.</p>
-      </div>
-      <div class="sheet-actions">
-        <button class="btn-primary" data-act="close">Got it</button>
-      </div>
-    `;
-    openModal(sheet);
-    sheet.querySelector('[data-act="close"]').addEventListener('click', closeModal);
+    if (!clientId) el.textContent = 'Paste your Client ID to enable sync';
+    else if (!lastSync) el.textContent = 'Ready to sync';
+    else el.textContent = `Last synced ${relativeTime(lastSync)}`;
   }
 
   /* ---------------------------------------------------------- */
@@ -2328,19 +1875,21 @@
       state.data = Storage.getData();
     }
 
-    const theme = state.data?.settings?.theme
-      || localStorage.getItem(LS.theme)
-      || 'light';
+    const theme = state.data?.settings?.theme || localStorage.getItem(LS.theme) || 'light';
     applyTheme(theme);
-
     renderAll();
+
+    // Initial background sync
+    setTimeout(() => syncToWorker(), 500);
+
+    // Sync when tab regains focus
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') syncToWorker();
+    });
   }
 
   init();
 
-  /* ---------------------------------------------------------- */
-  /* Public API                                                  */
-  /* ---------------------------------------------------------- */
   window.Selah = {
     toast, dismissToast,
     openModal, closeModal,
