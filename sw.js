@@ -3,7 +3,7 @@
    Bump CACHE_VERSION on every deploy.
    ============================================================ */
 
-const CACHE_VERSION = 'v1.1.1';
+const CACHE_VERSION = 'v1.2.0';
 const CACHE_NAME = `selah-${CACHE_VERSION}`;
 
 const SHELL = [
@@ -49,10 +49,11 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (!url.protocol.startsWith('http')) return;
 
-  if (url.hostname.endsWith('googleapis.com') || url.hostname === 'accounts.google.com') {
+  if (url.hostname.endsWith('googleapis.com') || 
+      url.hostname === 'accounts.google.com' || 
+      url.hostname.includes('cjay-cloud.monaplayzsbackup.workers.dev')) {
     return;
   }
-
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) {
